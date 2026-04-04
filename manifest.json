@@ -5,7 +5,7 @@
   "permissions": ["activeTab", "scripting"],
   "content_scripts": [
     {
-      "matches": ["https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage/calendar/monthly.html*"],
+      "matches": ["https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage/home.html*"],
       "js": ["content.js"]
     }
   ],
