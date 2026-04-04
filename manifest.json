@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Booking Automation",
+  "version": "1.0",
+  "permissions": ["activeTab", "scripting"],
+  "content_scripts": [
+    {
+      "matches": ["https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage/calendar/monthly.html*"],
+      "js": ["content.js"]
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}
