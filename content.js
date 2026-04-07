@@ -293,18 +293,45 @@ function buildCalendar(reservations, year, month) {
   return rows;
 }
 
+// ── Fetch report as binary ────────────────────────────────────────────────────
+
+/**
+ * Fetch the latest report's binary data (XLS/XLSX) and return as base64.
+ * Uses the booking.com API to list reports, picks the latest, then fetches it.
+ */
+async function fetchLatestReportBinary() {
+  const reports = await fetchReportList();
+  if (reports.length === 0) throw new Error('No reports available');
+
+  const latestReport = reports.reduce((max, r) => (r.id > max.id ? r : max), reports[0]);
+  console.log('[content.js] Fetching binary for report:', latestReport);
+
+  const ses = getSessionId();
+  const url = `https://admin.booking.com/fresa/extranet/reservations/download_request?lang=xu&hotel_account_id=${HOTEL_ACCOUNT_ID}&ses=${ses}&hotel_id=${HOTEL_ID}&report_id=${latestReport.id}`;
+
+  const response = await fetch(url, { credentials: 'include' });
+  if (!response.ok) throw new Error(`Download failed: ${response.status}`);
+
+  const buf = await response.arrayBuffer();
+  // Convert ArrayBuffer to base64 string for messaging
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  const base64 = btoa(binary);
+
+  return { base64, reportName: latestReport.name || `report_${latestReport.id}` };
+}
+
 // ── Message listener ──────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   // Navigate to the reservation-statements download page.
-  // The content script will auto-click the download button once the page loads.
   if (msg.action === 'extractReservations') {
     const url = navigateToDownloadPage();
     sendResponse({ navigating: true, url });
   }
 
-  // Explicit request to click the download button (sent after the download
-  // page has finished loading and the auto-click did not fire).
+  // Explicit request to click the download button.
   if (msg.action === 'clickDownloadButton') {
     const clicked = clickDownloadButton();
     sendResponse({ clicked });
@@ -315,7 +342,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     sendResponse({ calendar: buildCalendar(allReservations, year, month) });
   }
 
-  // Legacy action: redirect to the download page (same as 'extractReservations').
+  // Fetch latest report as base64 binary for XLS parsing in popup.
+  if (msg.action === 'fetchLatestReportBinary') {
+    fetchLatestReportBinary()
+      .then(result => sendResponse({ success: true, ...result }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+  }
+
+  // Legacy action: redirect to the download page.
   if (msg.action === 'run') {
     const url = navigateToDownloadPage();
     sendResponse({ navigating: true, url });
