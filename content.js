@@ -3,17 +3,15 @@
 /** Hardcoded hotel ID for the booking.com property. */
 const HOTEL_ID = '15204299';
 
+/** Hardcoded hotel account ID for the booking.com property. */
+const HOTEL_ACCOUNT_ID = '25086419';
+
 /**
  * The path (relative to the booking.com admin host) for the reservation
  * search page where the xlsx download can be triggered.
  */
 const RESERVATION_SEARCH_PATH =
   '/hotel/hoteladmin/extranet_ng/manage/search_reservations.html';
-
-/**
- * CSS selector that matches the "Download reservations statement" button.
- */
-const DOWNLOAD_BUTTON_SELECTOR = 'button.bui-button--tertiary';
 
 /**
  * Format a Date as YYYY-MM-DD (local time).
@@ -72,89 +70,97 @@ function navigateToDownloadPage() {
 }
 
 /**
- * Find and click the "Download reservations statement" button.
- * Returns true when the button was found and clicked, false otherwise.
+ * Fetch the list of available reports from booking.com API.
+ * Returns array of report objects with id, name, status, etc.
  */
-function clickDownloadButton() {
-  // Find button containing "Download reservations statement" text
-  const buttons = document.querySelectorAll(DOWNLOAD_BUTTON_SELECTOR);
-  for (const btn of buttons) {
-    if (btn.textContent.includes('Download reservations statement')) {
-      console.log('[content.js] Clicking download button:', btn);
-      btn.click();
-      return true;
-    }
+async function fetchReportList() {
+  const ses = getSessionId();
+  const url = `https://admin.booking.com/fresa/extranet/reservations/list_request?hotel_id=${HOTEL_ID}&ses=${ses}&hotel_account_id=${HOTEL_ACCOUNT_ID}&lang=xu`;
+
+  console.log('[content.js] Fetching report list from:', url);
+
+  const response = await fetch(url, {
+    credentials: 'include'
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch report list: ${response.status}`);
   }
-  console.warn('[content.js] Download button not found');
-  return false;
+
+  const data = await response.json();
+
+  if (!data.success || !data.data?.ok) {
+    throw new Error('API returned error');
+  }
+
+  return data.data.reports || [];
 }
 
 /**
- * Wait for the download list item matching our date range to appear,
- * then click it to start the download.
+ * Download a report by its ID.
+ * Navigates to the download URL which triggers the browser download.
  */
-function waitForDownloadItem() {
-  const today = new Date();
-  const sixMonthsLater = new Date(today);
-  sixMonthsLater.setMonth(sixMonthsLater.getMonth() + 6);
-  const expectedDateFrom = formatISODate(today);
-  const expectedDateTo = formatISODate(sixMonthsLater);
-  const expectedText = `Check-in ${expectedDateFrom} to ${expectedDateTo}`;
+function downloadReport(reportId) {
+  const ses = getSessionId();
+  const url = `https://admin.booking.com/fresa/extranet/reservations/download_request?lang=xu&hotel_account_id=${HOTEL_ACCOUNT_ID}&ses=${ses}&hotel_id=${HOTEL_ID}&report_id=${reportId}`;
 
-  return new Promise((resolve, reject) => {
-    let attempts = 0;
-    const maxAttempts = 30; // 30 seconds max
+  console.log('[content.js] Downloading report:', url);
 
-    const checkForItem = () => {
-      const items = document.querySelectorAll('li.res-download-item');
-      for (const item of items) {
-        const text = item.textContent || '';
-        if (text.includes(expectedDateFrom) && text.includes(expectedDateTo) && text.includes('Ready to download')) {
-          console.log('[content.js] Found download item, clicking:', item);
-          item.click();
-          resolve(true);
-          return;
-        }
-      }
-
-      attempts++;
-      if (attempts >= maxAttempts) {
-        reject(new Error('Timeout waiting for download item'));
-        return;
-      }
-      setTimeout(checkForItem, 1000);
-    };
-
-    checkForItem();
-  });
+  // Create a temporary link and click it to trigger download
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = '';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
 }
 
-// ── Auto-click on the reservation search page ──────────────────────────────
+/**
+ * Fetch reports and download the one with the largest ID.
+ */
+async function downloadLatestReport() {
+  const reports = await fetchReportList();
+
+  if (reports.length === 0) {
+    throw new Error('No reports available');
+  }
+
+  // Find report with largest ID
+  const latestReport = reports.reduce((max, report) =>
+    report.id > max.id ? report : max
+  , reports[0]);
+
+  console.log('[content.js] Latest report:', latestReport);
+
+  downloadReport(latestReport.id);
+
+  return latestReport;
+}
+
+// ── Auto-download on the reservation search page ──────────────────────────────
 
 /**
  * When the content script is injected into the reservation search page,
- * automatically click the download button, then wait for the download
- * list item to appear and click it.
+ * fetch the report list via API and download the latest report.
  */
 if (window.location.pathname.includes('search_reservations')) {
   const startDownload = async () => {
-    // First click "Download reservations statement" button
-    await new Promise(r => setTimeout(r, 1000)); // Wait for page to settle
-    const clicked = clickDownloadButton();
-    if (clicked) {
-      // Wait for download list to appear and click the matching item
-      try {
-        await waitForDownloadItem();
-        console.log('[content.js] Download initiated successfully');
-      } catch (e) {
-        console.warn('[content.js] Failed to find download item:', e.message);
-      }
+    // Wait for page to settle
+    await new Promise(r => setTimeout(r, 2000));
+
+    try {
+      const report = await downloadLatestReport();
+      console.log('[content.js] Download initiated for report:', report.name);
+    } catch (e) {
+      console.warn('[content.js] Failed to download report:', e.message);
     }
   };
 
   if (document.readyState === 'loading') {
+    console.log('[content.js] Waiting for DOMContentLoaded to start download');
     document.addEventListener('DOMContentLoaded', startDownload);
   } else {
+    console.log('[content.js] Document already loaded, starting download');
     startDownload();
   }
 }
