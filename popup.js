@@ -150,7 +150,10 @@ async function triggerReservationDownload(tabId) {
     throw new Error('Content script did not confirm navigation.');
   }
 
-  // 2. Wait for the browser to start a new .xlsx download (up to DOWNLOAD_TIMEOUT_MS).
+  // 2. Wait 10 seconds for the page to load and settle.
+  await new Promise(resolve => setTimeout(resolve, 10_000));
+
+  // 3. Wait for the browser to start a new .xlsx download (up to DOWNLOAD_TIMEOUT_MS).
   //    The content script auto-clicks the download button once the
   //    reservation-statements page has loaded.
   return new Promise((resolve, reject) => {
@@ -261,9 +264,20 @@ function loadSettings() {
 
 // ── Main workflow ─────────────────────────────────────────────────────────────
 
+/**
+ * Get array of {year, month} objects from current month to 6 months ahead.
+ */
+function getMonthRange() {
+  const months = [];
+  const now = new Date();
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+    months.push({ year: d.getFullYear(), month: d.getMonth() + 1 });
+  }
+  return months;
+}
+
 async function runAutomation() {
-  const year    = parseInt(document.getElementById('year').value, 10);
-  const month   = parseInt(document.getElementById('month').value, 10);
   const sourceSheetId = document.getElementById('sourceSheetId').value.trim();
   const sourceRange   = document.getElementById('sourceRange').value.trim() || DEFAULT_SOURCE_RANGE;
   const targetSheetId = document.getElementById('targetSheetId').value.trim();
@@ -317,16 +331,21 @@ async function runAutomation() {
       return;
     }
 
-    // 3. Build calendar from phone reservations
-    showStatus('Building calendar…', 'info');
-    const calendar = buildCalendar(phoneRes, year, month);
+    // 3. Build calendars for each month in range and write to Google Sheet
+    const monthRange = getMonthRange();
+    showStatus(`Building calendars for ${monthRange.length} months…`, 'info');
 
-    // 4. Write to Google Sheet
-    showStatus('Writing calendar to Google Sheet…', 'info');
-    await writeCalendarToSheet(targetSheetId, calendar, year, month, token);
+    for (const { year, month } of monthRange) {
+      const calendar = buildCalendar(phoneRes, year, month);
+      const monthName = new Date(year, month - 1, 1).toLocaleString('default', { month: 'short' });
+      showStatus(`Writing ${monthName} ${year}…`, 'info');
+      await writeCalendarToSheet(targetSheetId, calendar, year, month, token);
+    }
 
-    const monthName = new Date(year, month - 1, 1).toLocaleString('default', { month: 'long' });
-    showStatus(`✅ Calendar written for ${monthName} ${year} (${phoneRes.length} phone reservation(s)).`, 'success');
+    const firstMonth = monthRange[0];
+    const lastMonth = monthRange[monthRange.length - 1];
+    const rangeStr = `${new Date(firstMonth.year, firstMonth.month - 1).toLocaleString('default', { month: 'short' })} ${firstMonth.year} – ${new Date(lastMonth.year, lastMonth.month - 1).toLocaleString('default', { month: 'short' })} ${lastMonth.year}`;
+    showStatus(`✅ Calendars written for ${rangeStr} (${phoneRes.length} phone reservation(s)).`, 'success');
   } catch (e) {
     showStatus(`Error: ${e.message}`, 'error');
   } finally {
@@ -337,11 +356,6 @@ async function runAutomation() {
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
-  // Default month/year to current
-  const now = new Date();
-  document.getElementById('year').value  = now.getFullYear();
-  document.getElementById('month').value = now.getMonth() + 1;
-
   loadSettings();
 
   document.getElementById('authenticate').addEventListener('click', async () => {

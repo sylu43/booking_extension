@@ -1,26 +1,19 @@
-// ── Download URL helpers ───────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/** Hardcoded hotel ID for the booking.com property. */
+const HOTEL_ID = '15204299';
 
 /**
  * The path (relative to the booking.com admin host) for the reservation
- * statements / bulk-export page.  The page contains a button that triggers
- * an Excel (.xlsx) download when clicked.
+ * search page where the xlsx download can be triggered.
  */
-const RESERVATION_STATEMENT_PATH =
-  '/hotel/hoteladmin/extranet_ng/manage/bulk_operations.html';
+const RESERVATION_SEARCH_PATH =
+  '/hotel/hoteladmin/extranet_ng/manage/search_reservations.html';
 
 /**
- * CSS selector that matches the "Download Excel" button on the reservation
- * statements page.  Selectors are ordered from most specific to least specific;
- * update the primary selector if booking.com changes their markup.
- *
- * Primary:   [data-ga-action="download_reservations"]  – semantic GA action attr
- * Secondary: [data-action="download"]                  – generic BUI download action
- * Fallback:  a[href*="download"], button[class*="download"]  – broad fallbacks
+ * CSS selector that matches the "Download reservations statement" button.
  */
-const DOWNLOAD_BUTTON_SELECTOR =
-  '[data-ga-action="download_reservations"], ' +
-  'a[data-action="download"], button[data-action="download"], ' +
-  'a[href*="download"], button[class*="download"]';
+const DOWNLOAD_BUTTON_SELECTOR = 'button.bui-button--tertiary';
 
 /**
  * Format a Date as YYYY-MM-DD (local time).
@@ -40,10 +33,13 @@ function getSessionId() {
 }
 
 /**
- * Build the full download URL for the reservation statements page:
- *   - ses       : current session token
- *   - date_from : today (YYYY-MM-DD)
- *   - date_to   : six months from today (YYYY-MM-DD)
+ * Build the full URL for the reservation search page with download params:
+ *   - ses        : current session token
+ *   - hotel_id   : hardcoded property ID
+ *   - date_from  : today (YYYY-MM-DD)
+ *   - date_to    : six months from today (YYYY-MM-DD)
+ *   - date_type  : 'arrival'
+ *   - upcoming_reservations : 1
  */
 function buildDownloadUrl() {
   const ses = getSessionId();
@@ -52,13 +48,17 @@ function buildDownloadUrl() {
   sixMonthsLater.setMonth(sixMonthsLater.getMonth() + 6);
 
   const params = new URLSearchParams({
-    lang:      'en',
+    upcoming_reservations: '1',
+    source: 'nav',
+    hotel_id: HOTEL_ID,
+    lang: 'xu',
     ses,
     date_from: formatISODate(today),
-    date_to:   formatISODate(sixMonthsLater)
+    date_to: formatISODate(sixMonthsLater),
+    date_type: 'arrival'
   });
 
-  return `https://admin.booking.com${RESERVATION_STATEMENT_PATH}?${params}`;
+  return `https://admin.booking.com${RESERVATION_SEARCH_PATH}?${params}`;
 }
 
 /**
@@ -72,33 +72,90 @@ function navigateToDownloadPage() {
 }
 
 /**
- * Find and click the "Download Excel" button on the reservation-statements page.
+ * Find and click the "Download reservations statement" button.
  * Returns true when the button was found and clicked, false otherwise.
  */
 function clickDownloadButton() {
-  const button = document.querySelector(DOWNLOAD_BUTTON_SELECTOR);
-  if (!button) {
-    console.warn('[content.js] Download button not found (selector:', DOWNLOAD_BUTTON_SELECTOR, ')');
-    return false;
+  // Find button containing "Download reservations statement" text
+  const buttons = document.querySelectorAll(DOWNLOAD_BUTTON_SELECTOR);
+  for (const btn of buttons) {
+    if (btn.textContent.includes('Download reservations statement')) {
+      console.log('[content.js] Clicking download button:', btn);
+      btn.click();
+      return true;
+    }
   }
-  console.log('[content.js] Clicking download button:', button);
-  button.click();
-  return true;
+  console.warn('[content.js] Download button not found');
+  return false;
 }
 
-// ── Auto-click on the reservation statements page ──────────────────────────────
+/**
+ * Wait for the download list item matching our date range to appear,
+ * then click it to start the download.
+ */
+function waitForDownloadItem() {
+  const today = new Date();
+  const sixMonthsLater = new Date(today);
+  sixMonthsLater.setMonth(sixMonthsLater.getMonth() + 6);
+  const expectedDateFrom = formatISODate(today);
+  const expectedDateTo = formatISODate(sixMonthsLater);
+  const expectedText = `Check-in ${expectedDateFrom} to ${expectedDateTo}`;
+
+  return new Promise((resolve, reject) => {
+    let attempts = 0;
+    const maxAttempts = 30; // 30 seconds max
+
+    const checkForItem = () => {
+      const items = document.querySelectorAll('li.res-download-item');
+      for (const item of items) {
+        const text = item.textContent || '';
+        if (text.includes(expectedDateFrom) && text.includes(expectedDateTo) && text.includes('Ready to download')) {
+          console.log('[content.js] Found download item, clicking:', item);
+          item.click();
+          resolve(true);
+          return;
+        }
+      }
+
+      attempts++;
+      if (attempts >= maxAttempts) {
+        reject(new Error('Timeout waiting for download item'));
+        return;
+      }
+      setTimeout(checkForItem, 1000);
+    };
+
+    checkForItem();
+  });
+}
+
+// ── Auto-click on the reservation search page ──────────────────────────────
 
 /**
- * When the content script is injected into the reservation-statements /
- * bulk-operations page, automatically click the download button so that
- * the .xlsx file download starts without any extra user interaction.
+ * When the content script is injected into the reservation search page,
+ * automatically click the download button, then wait for the download
+ * list item to appear and click it.
  */
-if (window.location.pathname.endsWith(RESERVATION_STATEMENT_PATH.split('?')[0])) {
-  // Wait for the page to be interactive before looking for the button.
+if (window.location.pathname.includes('search_reservations')) {
+  const startDownload = async () => {
+    // First click "Download reservations statement" button
+    await new Promise(r => setTimeout(r, 1000)); // Wait for page to settle
+    const clicked = clickDownloadButton();
+    if (clicked) {
+      // Wait for download list to appear and click the matching item
+      try {
+        await waitForDownloadItem();
+        console.log('[content.js] Download initiated successfully');
+      } catch (e) {
+        console.warn('[content.js] Failed to find download item:', e.message);
+      }
+    }
+  };
+
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', clickDownloadButton);
+    document.addEventListener('DOMContentLoaded', startDownload);
   } else {
-    clickDownloadButton();
+    startDownload();
   }
 }
 

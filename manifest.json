@@ -9,7 +9,7 @@
     "https://www.googleapis.com/*"
   ],
   "oauth2": {
-    "client_id": "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+    "client_id": "824987411505-bo618ferbcm4vplqc1oqahe35uccuebg.apps.googleusercontent.com",
     "scopes": [
       "https://www.googleapis.com/auth/spreadsheets"
     ]
@@ -18,7 +18,7 @@
     {
       "matches": [
         "https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage/home.html*",
-        "https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage/bulk_operations.html*"
+        "https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage/search_reservations.html*"
       ],
       "js": ["content.js"]
     }
