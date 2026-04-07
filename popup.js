@@ -3,6 +3,9 @@
 const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets';
 const DEFAULT_SOURCE_RANGE = 'Sheet1!A2:D';
 
+/** Maximum time (ms) to wait for the reservation .xlsx download to start. */
+const DOWNLOAD_TIMEOUT_MS = 60_000;
+
 // ── UI helpers ────────────────────────────────────────────────────────────────
 
 function showStatus(message, type = 'info') {
@@ -121,17 +124,55 @@ async function fetchPhoneReservations(sheetId, range, token) {
     }));
 }
 
-// ── booking.com reservations (via content script) ─────────────────────────────
+// ── booking.com reservations (download via content script) ───────────────────
 
-async function extractBookingReservations(tabId) {
-  return new Promise((resolve, reject) => {
+/**
+ * Ask the content script to navigate the current tab to the booking.com
+ * reservation-statements page (with the correct session, date_from, and
+ * date_to parameters) and wait for the .xlsx file to be downloaded.
+ *
+ * Resolves with { downloaded: true, filename } when the download completes,
+ * or rejects on error / timeout.
+ */
+async function triggerReservationDownload(tabId) {
+  // 1. Tell the content script to navigate to the download page.
+  const navResult = await new Promise((resolve, reject) => {
     chrome.tabs.sendMessage(tabId, { action: 'extractReservations' }, (response) => {
       if (chrome.runtime.lastError) {
         reject(new Error(chrome.runtime.lastError.message));
       } else {
-        resolve(response?.reservations || []);
+        resolve(response);
       }
     });
+  });
+
+  if (!navResult?.navigating) {
+    throw new Error('Content script did not confirm navigation.');
+  }
+
+  // 2. Wait for the browser to start a new .xlsx download (up to DOWNLOAD_TIMEOUT_MS).
+  //    The content script auto-clicks the download button once the
+  //    reservation-statements page has loaded.
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      chrome.downloads.onCreated.removeListener(listener);
+      reject(new Error('Timed out waiting for the .xlsx download to start.'));
+    }, DOWNLOAD_TIMEOUT_MS);
+
+    function listener(downloadItem) {
+      const isXlsx =
+        downloadItem.filename?.toLowerCase().endsWith('.xlsx') ||
+        downloadItem.mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      // Only match downloads that originate from the booking.com admin domain.
+      const isFromBooking = downloadItem.url?.includes('admin.booking.com');
+      if (isXlsx && isFromBooking) {
+        clearTimeout(timer);
+        chrome.downloads.onCreated.removeListener(listener);
+        resolve({ downloaded: true, filename: downloadItem.filename });
+      }
+    }
+
+    chrome.downloads.onCreated.addListener(listener);
   });
 }
 
@@ -239,15 +280,19 @@ async function runAutomation() {
     showStatus('Signing in to Google…', 'info');
     const token = await getAuthToken(true);
 
-    // 1. Extract booking.com reservations from the active tab
-    showStatus('Extracting booking.com reservations…', 'info');
+    // 1. Navigate to the booking.com reservation-statements page and wait for
+    //    the .xlsx file to download.  The content script handles the navigation
+    //    and automatically clicks the download button once the page loads.
+    showStatus('Navigating to booking.com reservation statements page…', 'info');
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    let bookingRes = [];
+    let downloadSucceeded = false;
     try {
-      bookingRes = await extractBookingReservations(tab.id);
-      showStatus(`Found ${bookingRes.length} booking.com reservation(s).`, 'info');
+      const { filename } = await triggerReservationDownload(tab.id);
+      const shortName = filename ? filename.split(/[\\/]/).pop() : 'reservations.xlsx';
+      showStatus(`✅ Reservation statement downloaded: ${shortName}`, 'success');
+      downloadSucceeded = true;
     } catch (e) {
-      showStatus(`Warning: could not extract from booking.com page (${e.message}). Proceeding with phone reservations only.`, 'warning');
+      showStatus(`Warning: could not download reservation statement (${e.message}). Proceeding with phone reservations only.`, 'warning');
     }
 
     // 2. Fetch phone reservations (optional)
@@ -262,23 +307,26 @@ async function runAutomation() {
       }
     }
 
-    const allReservations = [...bookingRes, ...phoneRes];
-    if (allReservations.length === 0) {
-      showStatus('No reservations found for the selected period.', 'warning');
+    if (phoneRes.length === 0) {
+      // No phone reservations to build the calendar from.
+      // If the xlsx was also not downloaded, surface a clearer message.
+      if (!downloadSucceeded) {
+        showStatus('No reservations found: booking.com download failed and no phone reservations provided.', 'warning');
+      }
       setRunning(false);
       return;
     }
 
-    // 3. Build calendar
+    // 3. Build calendar from phone reservations
     showStatus('Building calendar…', 'info');
-    const calendar = buildCalendar(allReservations, year, month);
+    const calendar = buildCalendar(phoneRes, year, month);
 
     // 4. Write to Google Sheet
     showStatus('Writing calendar to Google Sheet…', 'info');
     await writeCalendarToSheet(targetSheetId, calendar, year, month, token);
 
     const monthName = new Date(year, month - 1, 1).toLocaleString('default', { month: 'long' });
-    showStatus(`✅ Calendar written for ${monthName} ${year} (${allReservations.length} reservations).`, 'success');
+    showStatus(`✅ Calendar written for ${monthName} ${year} (${phoneRes.length} phone reservation(s)).`, 'success');
   } catch (e) {
     showStatus(`Error: ${e.message}`, 'error');
   } finally {

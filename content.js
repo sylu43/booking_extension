@@ -1,3 +1,107 @@
+// ── Download URL helpers ───────────────────────────────────────────────────────
+
+/**
+ * The path (relative to the booking.com admin host) for the reservation
+ * statements / bulk-export page.  The page contains a button that triggers
+ * an Excel (.xlsx) download when clicked.
+ */
+const RESERVATION_STATEMENT_PATH =
+  '/hotel/hoteladmin/extranet_ng/manage/bulk_operations.html';
+
+/**
+ * CSS selector that matches the "Download Excel" button on the reservation
+ * statements page.  Selectors are ordered from most specific to least specific;
+ * update the primary selector if booking.com changes their markup.
+ *
+ * Primary:   [data-ga-action="download_reservations"]  – semantic GA action attr
+ * Secondary: [data-action="download"]                  – generic BUI download action
+ * Fallback:  a[href*="download"], button[class*="download"]  – broad fallbacks
+ */
+const DOWNLOAD_BUTTON_SELECTOR =
+  '[data-ga-action="download_reservations"], ' +
+  'a[data-action="download"], button[data-action="download"], ' +
+  'a[href*="download"], button[class*="download"]';
+
+/**
+ * Format a Date as YYYY-MM-DD (local time).
+ */
+function formatISODate(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+/**
+ * Extract the `ses` session token from the current page's query string.
+ */
+function getSessionId() {
+  return new URLSearchParams(window.location.search).get('ses') || '';
+}
+
+/**
+ * Build the full download URL for the reservation statements page:
+ *   - ses       : current session token
+ *   - date_from : today (YYYY-MM-DD)
+ *   - date_to   : six months from today (YYYY-MM-DD)
+ */
+function buildDownloadUrl() {
+  const ses = getSessionId();
+  const today = new Date();
+  const sixMonthsLater = new Date(today);
+  sixMonthsLater.setMonth(sixMonthsLater.getMonth() + 6);
+
+  const params = new URLSearchParams({
+    lang:      'en',
+    ses,
+    date_from: formatISODate(today),
+    date_to:   formatISODate(sixMonthsLater)
+  });
+
+  return `https://admin.booking.com${RESERVATION_STATEMENT_PATH}?${params}`;
+}
+
+/**
+ * Navigate the current tab to the reservation-statements download page.
+ * Returns the constructed URL so callers can report it.
+ */
+function navigateToDownloadPage() {
+  const url = buildDownloadUrl();
+  window.location.href = url;
+  return url;
+}
+
+/**
+ * Find and click the "Download Excel" button on the reservation-statements page.
+ * Returns true when the button was found and clicked, false otherwise.
+ */
+function clickDownloadButton() {
+  const button = document.querySelector(DOWNLOAD_BUTTON_SELECTOR);
+  if (!button) {
+    console.warn('[content.js] Download button not found (selector:', DOWNLOAD_BUTTON_SELECTOR, ')');
+    return false;
+  }
+  console.log('[content.js] Clicking download button:', button);
+  button.click();
+  return true;
+}
+
+// ── Auto-click on the reservation statements page ──────────────────────────────
+
+/**
+ * When the content script is injected into the reservation-statements /
+ * bulk-operations page, automatically click the download button so that
+ * the .xlsx file download starts without any extra user interaction.
+ */
+if (window.location.pathname.endsWith(RESERVATION_STATEMENT_PATH.split('?')[0])) {
+  // Wait for the page to be interactive before looking for the button.
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', clickDownloadButton);
+  } else {
+    clickDownloadButton();
+  }
+}
+
 // ── Date helpers ──────────────────────────────────────────────────────────────
 
 /**
@@ -121,99 +225,21 @@ function buildCalendar(reservations, year, month) {
   return rows;
 }
 
-// ── booking.com scraper ───────────────────────────────────────────────────────
-
-function extractBookingReservations() {
-  const block = document.querySelector(
-    'div.homepage-blocks-wrapper.homepage-selectable-card-wrapper.bui-spacer--large'
-  );
-  if (!block) {
-    console.warn('[content.js] Reservation block not found');
-    return [];
-  }
-
-  const grid = block.querySelector('ul.bui-list.bui-list--divided.bui-list--text');
-  if (!grid) {
-    console.warn('[content.js] Reservation list not found');
-    return [];
-  }
-
-  const reservations = [];
-
-  grid.querySelectorAll('li.bui-list__item').forEach(item => {
-    // Guest name
-    const nameEl = item.querySelector('.bui-flag__text');
-    const name = nameEl ? nameEl.textContent.trim() : '';
-
-    // Order number
-    const orderLinkEl = item.querySelector('a[title]');
-    const orderNumber = orderLinkEl ? orderLinkEl.getAttribute('title') : '';
-
-    // Room types – direct .bui-f-color-grayscale children of first spacer
-    const spacers = item.querySelectorAll('.reservation-overview-item--spacer');
-    const roomTypes = [];
-    if (spacers[0]) {
-      spacers[0].querySelectorAll(':scope > .bui-f-color-grayscale').forEach(div => {
-        const text = div.textContent.trim();
-        if (text) roomTypes.push(text);
-      });
-    }
-
-    // Check-in / check-out dates – first .bui-f-color-grayscale in second spacer
-    let startDate = '', endDate = '';
-    if (spacers[1]) {
-      const dateDiv = spacers[1].querySelector(':scope > .bui-f-color-grayscale');
-      if (dateDiv) {
-        const spans = dateDiv.querySelectorAll('span');
-        startDate = spans[0] ? spans[0].textContent.trim() : '';
-        endDate   = spans[2] ? spans[2].textContent.trim() : '';
-      }
-    }
-
-    // Guest count
-    let guestCount = '';
-    if (spacers[1]) {
-      const guestDiv = spacers[1].querySelector('[item]');
-      if (guestDiv) {
-        guestDiv.querySelectorAll('span').forEach(span => {
-          if (span.textContent.includes('adult')) guestCount = span.textContent.trim();
-        });
-      }
-    }
-
-    // Order date – last non-empty span in third spacer
-    let orderDate = '';
-    if (spacers[2]) {
-      const dateDiv = spacers[2].querySelector('.bui-f-color-grayscale');
-      if (dateDiv) {
-        dateDiv.querySelectorAll('span').forEach(span => {
-          const text = span.textContent.trim();
-          if (text) orderDate = text;
-        });
-      }
-    }
-
-    reservations.push({
-      name,
-      orderNumber,
-      roomTypes,
-      startDate,
-      endDate,
-      guestCount,
-      orderDate,
-      source: 'booking.com'
-    });
-  });
-
-  console.log(`Extracted ${reservations.length} reservations from booking.com`);
-  return reservations;
-}
-
 // ── Message listener ──────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  // Navigate to the reservation-statements download page.
+  // The content script will auto-click the download button once the page loads.
   if (msg.action === 'extractReservations') {
-    sendResponse({ reservations: extractBookingReservations() });
+    const url = navigateToDownloadPage();
+    sendResponse({ navigating: true, url });
+  }
+
+  // Explicit request to click the download button (sent after the download
+  // page has finished loading and the auto-click did not fire).
+  if (msg.action === 'clickDownloadButton') {
+    const clicked = clickDownloadButton();
+    sendResponse({ clicked });
   }
 
   if (msg.action === 'buildCalendar') {
@@ -221,9 +247,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     sendResponse({ calendar: buildCalendar(allReservations, year, month) });
   }
 
-  // Legacy action kept for compatibility
+  // Legacy action: redirect to the download page (same as 'extractReservations').
   if (msg.action === 'run') {
-    sendResponse({ reservations: extractBookingReservations() });
+    const url = navigateToDownloadPage();
+    sendResponse({ navigating: true, url });
   }
 
   return true; // keep channel open for async use
