@@ -2,7 +2,18 @@
   "manifest_version": 3,
   "name": "Booking Automation",
   "version": "1.0",
-  "permissions": ["activeTab", "scripting"],
+  "permissions": ["activeTab", "scripting", "identity", "storage", "tabs"],
+  "host_permissions": [
+    "https://admin.booking.com/*",
+    "https://sheets.googleapis.com/*",
+    "https://www.googleapis.com/*"
+  ],
+  "oauth2": {
+    "client_id": "YOUR_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/spreadsheets"
+    ]
+  },
   "content_scripts": [
     {
       "matches": ["https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage/home.html*"],
