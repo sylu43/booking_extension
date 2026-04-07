@@ -98,21 +98,26 @@ async function fetchReportList() {
 
 /**
  * Download a report by its ID.
- * Navigates to the download URL which triggers the browser download.
+ * Sends request to background script to use chrome.downloads API (skips Save As dialog).
  */
 function downloadReport(reportId) {
   const ses = getSessionId();
   const url = `https://admin.booking.com/fresa/extranet/reservations/download_request?lang=xu&hotel_account_id=${HOTEL_ACCOUNT_ID}&ses=${ses}&hotel_id=${HOTEL_ID}&report_id=${reportId}`;
 
-  console.log('[content.js] Downloading report:', url);
+  console.log('[content.js] Requesting download:', url);
 
-  // Create a temporary link and click it to trigger download
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = '';
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
+  // Send to background script to download without Save As dialog
+  chrome.runtime.sendMessage({
+    action: 'downloadFile',
+    url: url,
+    filename: `reservations_${reportId}.xlsx`
+  }, (response) => {
+    if (response?.success) {
+      console.log('[content.js] Download started, ID:', response.downloadId);
+    } else {
+      console.error('[content.js] Download failed:', response?.error);
+    }
+  });
 }
 
 /**
