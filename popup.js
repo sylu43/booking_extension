@@ -325,112 +325,116 @@ function isRoomAvailable(roomAssignments, roomIndex, startDate, endDate) {
 }
 
 /**
- * Find available rooms of a specific type, preferring a specific floor.
- * Returns array of room indices.
+ * Calculate how far apart a set of rooms are by room number.
  */
-function findAvailableRooms(roomAssignments, type, quantity, startDate, endDate, preferredFloor = null) {
+function roomSpread(indices) {
+  if (indices.length <= 1) return 0;
+  const numbers = indices.map(i => parseInt(ROOMS[i].number));
+  return Math.max(...numbers) - Math.min(...numbers);
+}
+
+/**
+ * Find the combination of available rooms that satisfies all needed types
+ * with minimum spread (room numbers as close together as possible).
+ * @param {Array}         roomAssignments - current room assignment arrays
+ * @param {Array<string>} neededTypes     - flat list of types, e.g. ['double','quadruple']
+ * @param {Object}        reservation     - must have startParsed / endParsed
+ * @param {number|null}   floor           - restrict to this floor, or null for any
+ * @returns {Array<number>|null} room indices, or null if impossible
+ */
+function findClosestRooms(roomAssignments, neededTypes, reservation, floor) {
   const candidates = [];
-
-  // First pass: rooms on preferred floor
-  if (preferredFloor) {
+  for (const type of neededTypes) {
+    const typeCandidates = [];
     for (let i = 0; i < ROOMS.length; i++) {
-      if (ROOMS[i].type === type && ROOMS[i].floor === preferredFloor) {
-        if (isRoomAvailable(roomAssignments, i, startDate, endDate)) {
-          candidates.push(i);
-          if (candidates.length >= quantity) return candidates;
-        }
+      if (ROOMS[i].type !== type) continue;
+      if (floor !== null && ROOMS[i].floor !== floor) continue;
+      if (!isRoomAvailable(roomAssignments, i, reservation.startParsed, reservation.endParsed)) continue;
+      typeCandidates.push(i);
+    }
+    if (typeCandidates.length === 0) return null;
+    candidates.push(typeCandidates);
+  }
+
+  let bestCombo = null;
+  let bestSpread = Infinity;
+
+  function backtrack(depth, chosen) {
+    if (depth === candidates.length) {
+      const spread = roomSpread(chosen);
+      if (spread < bestSpread) {
+        bestSpread = spread;
+        bestCombo = [...chosen];
       }
+      return;
+    }
+    for (const idx of candidates[depth]) {
+      if (chosen.includes(idx)) continue;
+      chosen.push(idx);
+      backtrack(depth + 1, chosen);
+      chosen.pop();
     }
   }
 
-  // Second pass: any floor
-  for (let i = 0; i < ROOMS.length; i++) {
-    if (ROOMS[i].type === type && !candidates.includes(i)) {
-      if (isRoomAvailable(roomAssignments, i, startDate, endDate)) {
-        candidates.push(i);
-        if (candidates.length >= quantity) return candidates;
-      }
-    }
-  }
-
-  return candidates;
+  backtrack(0, []);
+  return bestCombo;
 }
 
 /**
  * Assign rooms to a reservation based on its room requirements.
- * Tries to keep rooms on the same floor.
+ * Rules:
+ * - If any room is triple/family → prefer floor 3, rooms close together
+ * - If multi-room with no triple/family → try both floors, pick closest spread
+ * - If single room → prefer floor 2 first
+ * Falls back to cross-floor assignment if no single floor works.
  */
 function assignRoomsToReservation(roomAssignments, reservation) {
-  const rooms = reservation.rooms || [];
-  if (rooms.length === 0) return [];
+  const roomReqs = reservation.rooms || [];
+  if (roomReqs.length === 0) return [];
+
+  // Flatten requirements into individual type entries
+  const neededTypes = [];
+  for (const req of roomReqs) {
+    const type = normalizeRoomType(req.name);
+    if (!type) continue;
+    const qty = req.quantity || 1;
+    for (let q = 0; q < qty; q++) neededTypes.push(type);
+  }
+  if (neededTypes.length === 0) return [];
+
+  const isSingle = neededTypes.length === 1;
+  const needsThirdFloor = neededTypes.some(t => t === 'triple' || t === 'family');
+
+  let bestAssignment = null;
+
+  if (needsThirdFloor) {
+    // Prefer floor 3, then floor 2, then cross-floor
+    bestAssignment = findClosestRooms(roomAssignments, neededTypes, reservation, 3)
+                  || findClosestRooms(roomAssignments, neededTypes, reservation, 2)
+                  || findClosestRooms(roomAssignments, neededTypes, reservation, null);
+  } else if (isSingle) {
+    // Single room: prefer floor 2, then floor 3
+    bestAssignment = findClosestRooms(roomAssignments, neededTypes, reservation, 2)
+                  || findClosestRooms(roomAssignments, neededTypes, reservation, 3);
+  } else {
+    // Multi-room, no triple/family: try both floors, pick tightest spread
+    const floor2 = findClosestRooms(roomAssignments, neededTypes, reservation, 2);
+    const floor3 = findClosestRooms(roomAssignments, neededTypes, reservation, 3);
+    if (floor2 && floor3) {
+      bestAssignment = roomSpread(floor2) <= roomSpread(floor3) ? floor2 : floor3;
+    } else {
+      bestAssignment = floor2 || floor3
+                    || findClosestRooms(roomAssignments, neededTypes, reservation, null);
+    }
+  }
+
+  if (!bestAssignment) return [];
 
   const assigned = [];
-
-  // Determine preferred floor based on first room type availability
-  let preferredFloor = null;
-
-  // Try floor 2 first, then floor 3
-  for (const floor of [2, 3]) {
-    let canFitAll = true;
-    const tempAssignments = [];
-
-    for (const roomReq of rooms) {
-      const type = normalizeRoomType(roomReq.name);
-      if (!type) continue;
-
-      const quantity = roomReq.quantity || 1;
-      const available = findAvailableRooms(
-        roomAssignments,
-        type,
-        quantity,
-        reservation.startParsed,
-        reservation.endParsed,
-        floor
-      );
-
-      if (available.length < quantity) {
-        canFitAll = false;
-        break;
-      }
-
-      tempAssignments.push({ type, indices: available.slice(0, quantity) });
-    }
-
-    if (canFitAll) {
-      preferredFloor = floor;
-      // Actually assign the rooms
-      for (const { indices } of tempAssignments) {
-        for (const idx of indices) {
-          roomAssignments[idx].push(reservation);
-          assigned.push(idx);
-        }
-      }
-      break;
-    }
+  for (const idx of bestAssignment) {
+    roomAssignments[idx].push(reservation);
+    assigned.push(idx);
   }
-
-  // If we couldn't fit on a single floor, assign wherever available
-  if (preferredFloor === null) {
-    for (const roomReq of rooms) {
-      const type = normalizeRoomType(roomReq.name);
-      if (!type) continue;
-
-      const quantity = roomReq.quantity || 1;
-      const available = findAvailableRooms(
-        roomAssignments,
-        type,
-        quantity,
-        reservation.startParsed,
-        reservation.endParsed
-      );
-
-      for (let i = 0; i < Math.min(quantity, available.length); i++) {
-        roomAssignments[available[i]].push(reservation);
-        assigned.push(available[i]);
-      }
-    }
-  }
-
   return assigned;
 }
 
