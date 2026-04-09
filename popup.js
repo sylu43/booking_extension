@@ -100,115 +100,10 @@ async function fetchPhoneReservations(sheetId, range, token) {
     }));
 }
 
-// ── booking.com reservations (fetch report binary via content script) ─────────
+// ── Google Sheet tab helpers ─────────────────────────────────────────────────
 
 /**
- * Ask the content script to fetch the latest report as binary XLS data.
- * Returns the base64-encoded file contents.
- */
-async function fetchReportBinary(tabId) {
-  return new Promise((resolve, reject) => {
-    chrome.tabs.sendMessage(tabId, { action: 'fetchLatestReportBinary' }, (response) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-      } else if (!response?.success) {
-        reject(new Error(response?.error || 'Failed to fetch report'));
-      } else {
-        resolve({ base64: response.base64, reportName: response.reportName });
-      }
-    });
-  });
-}
-
-// ── XLS parsing (using SheetJS) ──────────────────────────────────────────────
-
-/** Column indices in the booking.com XLS export. */
-const XLS_COLS = {
-  BOOK_NUMBER: 0,
-  BOOKED_BY: 1,
-  GUEST_NAME: 2,
-  CHECK_IN: 3,
-  CHECK_OUT: 4,
-  BOOKED_ON: 5,
-  STATUS: 6,
-  ROOMS: 7,
-  PEOPLE: 8,
-  ADULTS: 9,
-  CHILDREN: 10,
-  CHILDREN_AGES: 11,
-  PRICE: 12,
-  COMMISSION_PCT: 13,
-  COMMISSION_AMT: 14,
-  PAYMENT_STATUS: 15,
-  PAYMENT_METHOD: 16,
-  REMARKS: 17,
-  BOOKER_COUNTRY: 18,
-  TRAVEL_PURPOSE: 19,
-  DEVICE: 20,
-  UNIT_TYPE: 21,
-  DURATION: 22,
-  CANCELLATION_DATE: 23,
-  ADDRESS: 24,
-  PHONE: 25
-};
-
-/**
- * Convert a cell value to a stable string (avoids scientific notation for large numbers).
- */
-function cellToString(val) {
-  if (val == null) return '';
-  if (typeof val === 'number') {
-    // Avoid scientific notation for large booking numbers
-    return Number.isInteger(val) ? val.toFixed(0) : String(val);
-  }
-  return String(val).trim();
-}
-
-/**
- * Parse a base64-encoded XLS/XLSX file into { headers: string[], rows: string[][] }.
- * Each row is an array of string cell values.
- */
-function parseXlsBase64(base64) {
-  const binaryStr = atob(base64);
-  const wb = XLSX.read(binaryStr, { type: 'binary' });
-  const sheetName = wb.SheetNames[0];
-  const sheet = wb.Sheets[sheetName];
-  // Get raw 2D array (header: 1 means row 0 is included as data, not keys)
-  const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-  if (aoa.length === 0) return { headers: [], rows: [] };
-
-  const headers = aoa[0].map(cellToString);
-  const rows = aoa.slice(1)
-    .filter(r => r.some(c => c !== '' && c != null))   // skip empty rows
-    .map(r => r.map(cellToString));
-
-  return { headers, rows };
-}
-
-/**
- * Convert parsed XLS rows into reservation objects for buildCalendar.
- * Filters out cancelled reservations.
- */
-function xlsRowsToReservations(rows) {
-  return rows
-    .filter(r => r[XLS_COLS.STATUS] === 'ok')
-    .map(r => ({
-      orderNumber: r[XLS_COLS.BOOK_NUMBER],
-      name:        r[XLS_COLS.GUEST_NAME] || r[XLS_COLS.BOOKED_BY],
-      startDate:   r[XLS_COLS.CHECK_IN],
-      endDate:     r[XLS_COLS.CHECK_OUT],
-      unitType:    r[XLS_COLS.UNIT_TYPE],
-      rooms:       r[XLS_COLS.ROOMS],
-      source:      'booking'
-    }));
-}
-
-// ── Google Sheet upsert (by order number) ────────────────────────────────────
-
-const RESERVATIONS_TAB = 'Reservations';
-
-/**
- * Ensure a sheet tab exists. Returns the sheet metadata.
+ * Ensure a sheet tab exists.
  */
 async function ensureTab(spreadsheetId, tabName, token) {
   const metaRes = await fetch(`${SHEETS_API}/${encodeURIComponent(spreadsheetId)}`, {
@@ -233,55 +128,7 @@ async function ensureTab(spreadsheetId, tabName, token) {
   }
 }
 
-/**
- * Upsert XLS reservation rows into the "Reservations" tab of the target sheet.
- * Uses the Book Number (column A) as the unique key.
- *
- * Strategy:
- *  1. Read all existing rows from the tab.
- *  2. Build a map: orderNumber → row data.
- *  3. Merge incoming XLS rows (insert new, update existing).
- *  4. Write the entire dataset back as a single PUT.
- */
-async function upsertReservationsToSheet(spreadsheetId, headers, newRows, token) {
-  await ensureTab(spreadsheetId, RESERVATIONS_TAB, token);
-
-  // Read existing data (skip header)
-  let existingRows = [];
-  try {
-    const data = await sheetsGet(spreadsheetId, `${RESERVATIONS_TAB}!A2:Z`, token);
-    existingRows = data.values || [];
-  } catch { /* tab is empty or doesn't have data yet */ }
-
-  // Build map from order number → row data (preserve insertion order)
-  const rowMap = new Map();
-  for (const row of existingRows) {
-    const key = (row[0] || '').toString().trim();
-    if (key) rowMap.set(key, row);
-  }
-
-  // Merge new rows (upsert)
-  let updatedCount = 0;
-  let insertedCount = 0;
-  for (const row of newRows) {
-    const key = (row[0] || '').toString().trim();
-    if (!key) continue;
-    if (rowMap.has(key)) {
-      updatedCount++;
-    } else {
-      insertedCount++;
-    }
-    rowMap.set(key, row);
-  }
-
-  // Convert map back to array and write with header
-  const allRows = [headers, ...rowMap.values()];
-  await sheetsUpdate(spreadsheetId, `${RESERVATIONS_TAB}!A1`, allRows, token);
-
-  return { updatedCount, insertedCount, totalCount: rowMap.size };
-}
-
-// ── Calendar builder (mirrors logic in content.js, runs in popup context) ─────
+// ── Calendar builder ─────────────────────────────────────────────────────────
 
 function parseDate(dateStr) {
   if (!dateStr) return null;
@@ -393,6 +240,11 @@ async function runAutomation() {
     return;
   }
 
+  if (!sourceSheetId) {
+    showStatus('Please enter the Source Google Sheet ID.', 'error');
+    return;
+  }
+
   setRunning(true);
   saveSettings();
 
@@ -400,59 +252,25 @@ async function runAutomation() {
     showStatus('Signing in to Google…', 'info');
     const token = await getAuthToken(true);
 
-    // 1. Fetch the booking.com XLS report as binary via content script.
-    showStatus('Fetching booking.com report data…', 'info');
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    let xlsReservations = [];
-    let xlsHeaders = [];
-    let xlsRows = [];
-
+    // 1. Fetch reservations from Google Sheet
+    showStatus('Fetching reservations from Google Sheet…', 'info');
+    let reservations = [];
     try {
-      const { base64, reportName } = await fetchReportBinary(tab.id);
-      showStatus(`Parsing report: ${reportName}…`, 'info');
-
-      const parsed = parseXlsBase64(base64);
-      xlsHeaders = parsed.headers;
-      xlsRows = parsed.rows;
-
-      // Upsert all XLS rows to the Reservations tab (keyed by Book Number).
-      showStatus(`Upserting ${xlsRows.length} rows to Reservations sheet…`, 'info');
-      const { updatedCount, insertedCount, totalCount } =
-        await upsertReservationsToSheet(targetSheetId, xlsHeaders, xlsRows, token);
-      showStatus(
-        `Reservations upserted: ${insertedCount} new, ${updatedCount} updated (${totalCount} total).`,
-        'info'
-      );
-
-      // Convert active (non-cancelled) XLS rows to reservation objects for the calendar.
-      xlsReservations = xlsRowsToReservations(xlsRows);
-      showStatus(`${xlsReservations.length} active booking.com reservation(s) for calendar.`, 'info');
+      reservations = await fetchPhoneReservations(sourceSheetId, sourceRange, token);
+      showStatus(`Found ${reservations.length} reservation(s).`, 'info');
     } catch (e) {
-      showStatus(`Warning: could not fetch/parse booking.com report (${e.message}). Proceeding with phone reservations only.`, 'warning');
-    }
-
-    // 2. Fetch phone reservations (optional)
-    let phoneRes = [];
-    if (sourceSheetId) {
-      showStatus('Fetching phone reservations from Google Sheet…', 'info');
-      try {
-        phoneRes = await fetchPhoneReservations(sourceSheetId, sourceRange, token);
-        showStatus(`Found ${phoneRes.length} phone reservation(s).`, 'info');
-      } catch (e) {
-        showStatus(`Warning: could not load phone reservations: ${e.message}`, 'warning');
-      }
-    }
-
-    // 3. Combine all reservations for calendar building
-    const allReservations = [...xlsReservations, ...phoneRes];
-
-    if (allReservations.length === 0) {
-      showStatus('No active reservations found from booking.com or phone sheet.', 'warning');
+      showStatus(`Error: could not load reservations: ${e.message}`, 'error');
       setRunning(false);
       return;
     }
 
-    // 4. Build calendars for all months and write to a single "Calendar" sheet
+    if (reservations.length === 0) {
+      showStatus('No reservations found in source sheet.', 'warning');
+      setRunning(false);
+      return;
+    }
+
+    // 2. Build calendars for all months and write to a single "Calendar" sheet
     const monthRange = getMonthRange();
     showStatus(`Building calendars for ${monthRange.length} months…`, 'info');
 
@@ -461,7 +279,7 @@ async function runAutomation() {
       const monthName = new Date(year, month - 1, 1).toLocaleString('default', { month: 'long' });
       // Month separator row
       allCalendarRows.push([`${monthName} ${year}`]);
-      const calendar = buildCalendar(allReservations, year, month);
+      const calendar = buildCalendar(reservations, year, month);
       allCalendarRows.push(...calendar);
       allCalendarRows.push([]);  // blank row between months
     }
@@ -470,7 +288,7 @@ async function runAutomation() {
     await clearAndWriteTab(targetSheetId, CALENDAR_TAB, allCalendarRows, token);
 
     showStatus(
-      `✅ Done! ${xlsReservations.length} booking.com + ${phoneRes.length} phone reservations written to Calendar.`,
+      `✅ Done! ${reservations.length} reservations written to Calendar.`,
       'success'
     );
   } catch (e) {

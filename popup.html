@@ -111,13 +111,12 @@
   <h2>🏨 Booking Automation</h2>
 
   <div class="field">
-    <label for="sourceSheetId">Phone Reservations – Google Sheet ID</label>
-    <input type="text" id="sourceSheetId" placeholder="(optional) Sheet ID for phone bookings" />
-    <p class="hint">Leave blank to use only booking.com data</p>
+    <label for="sourceSheetId">Source Reservations – Google Sheet ID <span style="color:red">*</span></label>
+    <input type="text" id="sourceSheetId" placeholder="Sheet ID containing reservations" />
   </div>
 
   <div class="field">
-    <label for="sourceRange">Phone Sheet Range</label>
+    <label for="sourceRange">Source Sheet Range</label>
     <input type="text" id="sourceRange" placeholder="e.g. Sheet1!A2:D" value="Sheet1!A2:D" />
     <p class="hint">Columns: Name | Check-in | Check-out | Room (optional)</p>
   </div>
