@@ -117,6 +117,7 @@ async function sheetsUpdate(spreadsheetId, range, values, token) {
 }
 
 const CALENDAR_TAB = 'Calendar';
+const BOOKING_TAG = ' [B]'; // Suffix marks booking.com entries
 
 /**
  * Clear all cells in a tab, then write new data starting at A1.
@@ -194,7 +195,9 @@ function parseExistingAssignments(sheetRows) {
             while (endDay + 1 <= numDays && (roomRow[endDay + 1] || '').trim() === name) {
               endDay++;
             }
-            blocks.push({ name, startDay, endDay });
+            const isBooking = name.endsWith(BOOKING_TAG);
+            const cleanName = isBooking ? name.slice(0, -BOOKING_TAG.length) : name;
+            blocks.push({ name: cleanName, startDay, endDay, isBooking });
             col = endDay + 1;
           } else {
             col++;
@@ -475,7 +478,21 @@ function buildCalendar(reservations, year, month, existingMonthAssignments = {})
           return r.startParsed < blockEnd && r.endParsed > blockStart;
         });
 
-        if (matchIdx === -1) continue; // cancelled or no match – skip
+        if (matchIdx === -1) {
+          if (block.isBooking) continue; // cancelled booking → remove
+          // Manual entry → preserve in its current room
+          const fakeRes = {
+            name: block.name,
+            source: 'manual',
+            startParsed: new Date(year, month - 1, block.startDay),
+            endParsed:   new Date(year, month - 1, block.endDay + 1),
+            rooms: []
+          };
+          if (isRoomAvailable(roomAssignments, i, fakeRes.startParsed, fakeRes.endParsed)) {
+            roomAssignments[i].push(fakeRes);
+          }
+          continue;
+        }
 
         // Verify no conflict with already-placed reservations in this room
         const res = parsed[matchIdx];
@@ -506,7 +523,7 @@ function buildCalendar(reservations, year, month, existingMonthAssignments = {})
       let cell = '';
       for (const res of roomAssignments[i]) {
         if (date >= res.startParsed && date < res.endParsed) {
-          cell = res.name || '';
+          cell = res.name ? res.name + (res.source !== 'manual' ? BOOKING_TAG : '') : '';
           break;
         }
       }
