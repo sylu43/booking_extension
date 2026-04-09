@@ -135,6 +135,85 @@ async function clearAndWriteTab(spreadsheetId, tabName, rows, token) {
   await sheetsUpdate(spreadsheetId, `${tabName}!A1`, rows, token);
 }
 
+// ── Read existing calendar ───────────────────────────────────────────────────
+
+/**
+ * Read the existing Calendar tab from Google Sheets.
+ * Returns raw row data or empty array if the tab doesn't exist yet.
+ */
+async function readExistingCalendar(spreadsheetId, token) {
+  await ensureTab(spreadsheetId, CALENDAR_TAB, token);
+  try {
+    const data = await sheetsGet(spreadsheetId, CALENDAR_TAB, token);
+    return data.values || [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Parse existing calendar sheet rows into room assignments per month.
+ * Returns a map: "YYYY-M" => { roomNumber: [{name, startDay, endDay}] }
+ * where startDay/endDay are 1-based day-of-month numbers (endDay is inclusive).
+ */
+function parseExistingAssignments(sheetRows) {
+  const result = {};
+  let i = 0;
+  while (i < sheetRows.length) {
+    const row = sheetRows[i] || [];
+    const monthMatch = (row[0] || '').match(/^([A-Za-z]+)\s+(\d{4})$/);
+    if (monthMatch) {
+      const monthName = monthMatch[1];
+      const year = parseInt(monthMatch[2]);
+      const monthDate = new Date(`${monthName} 1, ${year}`);
+      if (isNaN(monthDate)) { i++; continue; }
+      const month = monthDate.getMonth() + 1;
+      const key = `${year}-${month}`;
+
+      i++; // header row
+      if (i >= sheetRows.length) break;
+      const header = sheetRows[i] || [];
+      const numDays = header.length - 1;
+
+      const monthAssignments = {};
+      i++; // first room row
+      while (i < sheetRows.length) {
+        const roomRow = sheetRows[i] || [];
+        if (!roomRow[0] || roomRow.length <= 1) { i++; break; }
+
+        const roomNumber = (roomRow[0] || '').match(/^(\d+)/)?.[1];
+        if (!roomNumber) { i++; continue; }
+
+        const blocks = [];
+        let col = 1;
+        while (col <= numDays) {
+          const name = (roomRow[col] || '').trim();
+          if (name) {
+            const startDay = col;
+            let endDay = col;
+            while (endDay + 1 <= numDays && (roomRow[endDay + 1] || '').trim() === name) {
+              endDay++;
+            }
+            blocks.push({ name, startDay, endDay });
+            col = endDay + 1;
+          } else {
+            col++;
+          }
+        }
+        if (blocks.length > 0) {
+          monthAssignments[roomNumber] = blocks;
+        }
+        i++;
+      }
+
+      result[key] = monthAssignments;
+    } else {
+      i++;
+    }
+  }
+  return result;
+}
+
 // ── Phone reservations (from Google Sheet) ────────────────────────────────────
 
 /**
@@ -355,8 +434,13 @@ function assignRoomsToReservation(roomAssignments, reservation) {
 /**
  * Build a 2-D calendar grid for the given month.
  * Accepts reservation objects with { name, startDate, endDate, rooms }.
+ *
+ * When existingMonthAssignments is provided (from parseExistingAssignments),
+ * reservations that already appear in the existing calendar keep their room.
+ * Cancelled reservations (in existing but not in new data) are removed.
+ * New reservations are assigned to available rooms automatically.
  */
-function buildCalendar(reservations, year, month) {
+function buildCalendar(reservations, year, month, existingMonthAssignments = {}) {
   const daysInMonth = new Date(year, month, 0).getDate();
   const monthStart  = new Date(year, month - 1, 1);
   const monthEnd    = new Date(year, month - 1, daysInMonth);
@@ -371,8 +455,41 @@ function buildCalendar(reservations, year, month) {
   // Initialize room assignments
   const roomAssignments = Array.from({ length: ROOMS.length }, () => []);
 
-  // Assign rooms to each reservation
-  for (const res of parsed) {
+  // Phase 1: Restore existing room assignments for reservations that still exist
+  const placedIndices = new Set();
+  const hasExisting = Object.keys(existingMonthAssignments).length > 0;
+
+  if (hasExisting) {
+    for (let i = 0; i < ROOMS.length; i++) {
+      const roomNumber = ROOMS[i].number;
+      const existingBlocks = existingMonthAssignments[roomNumber] || [];
+      for (const block of existingBlocks) {
+        // Find a matching reservation by name with overlapping dates
+        const blockStart = new Date(year, month - 1, block.startDay);
+        const blockEnd   = new Date(year, month - 1, block.endDay + 1); // exclusive
+
+        const matchIdx = parsed.findIndex((r, idx) => {
+          if (placedIndices.has(idx)) return false;
+          if (r.name !== block.name) return false;
+          // Check date overlap between existing block and new reservation
+          return r.startParsed < blockEnd && r.endParsed > blockStart;
+        });
+
+        if (matchIdx === -1) continue; // cancelled or no match – skip
+
+        // Verify no conflict with already-placed reservations in this room
+        const res = parsed[matchIdx];
+        if (!isRoomAvailable(roomAssignments, i, res.startParsed, res.endParsed)) continue;
+
+        roomAssignments[i].push(res);
+        placedIndices.add(matchIdx);
+      }
+    }
+  }
+
+  // Phase 2: Assign remaining (new) reservations to available rooms
+  const unplaced = parsed.filter((_, idx) => !placedIndices.has(idx));
+  for (const res of unplaced) {
     assignRoomsToReservation(roomAssignments, res);
   }
 
@@ -474,16 +591,22 @@ async function runAutomation() {
       return;
     }
 
-    // 3. Build calendars for all months and write to a single "Calendar" sheet
+    // 3. Read existing calendar to preserve room arrangements
+    showStatus('Reading existing calendar…', 'info');
+    const existingRows = await readExistingCalendar(targetSheetId, token);
+    const existingAssignments = parseExistingAssignments(existingRows);
+
+    // 4. Build calendars, merging with existing room assignments
     const monthRange = getMonthRange();
     showStatus(`Building calendars for ${monthRange.length} months…`, 'info');
 
     const allCalendarRows = [];
     for (const { year, month } of monthRange) {
       const monthName = new Date(year, month - 1, 1).toLocaleString('default', { month: 'long' });
+      const monthKey = `${year}-${month}`;
       // Month separator row
       allCalendarRows.push([`${monthName} ${year}`]);
-      const calendar = buildCalendar(reservations, year, month);
+      const calendar = buildCalendar(reservations, year, month, existingAssignments[monthKey] || {});
       allCalendarRows.push(...calendar);
       allCalendarRows.push([]);  // blank row between months
     }
