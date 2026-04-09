@@ -31,143 +31,20 @@ function getSessionId() {
 }
 
 /**
- * Build the full URL for the reservation search page with download params:
- *   - ses        : current session token
- *   - hotel_id   : hardcoded property ID
- *   - date_from  : today (YYYY-MM-DD)
- *   - date_to    : six months from today (YYYY-MM-DD)
- *   - date_type  : 'arrival'
- *   - upcoming_reservations : 1
+ * Generate array of date strings (YYYY-MM-DD) from today to 6 months later.
  */
-function buildDownloadUrl() {
-  const ses = getSessionId();
+function generateDateRange() {
+  const dates = [];
   const today = new Date();
-  const sixMonthsLater = new Date(today);
-  sixMonthsLater.setMonth(sixMonthsLater.getMonth() + 6);
+  const end = new Date(today);
+  end.setMonth(end.getMonth() + 6);
 
-  const params = new URLSearchParams({
-    upcoming_reservations: '1',
-    source: 'nav',
-    hotel_id: HOTEL_ID,
-    lang: 'xu',
-    ses,
-    date_from: formatISODate(today),
-    date_to: formatISODate(sixMonthsLater),
-    date_type: 'arrival'
-  });
-
-  return `https://admin.booking.com${RESERVATION_SEARCH_PATH}?${params}`;
-}
-
-/**
- * Navigate the current tab to the reservation-statements download page.
- * Returns the constructed URL so callers can report it.
- */
-function navigateToDownloadPage() {
-  const url = buildDownloadUrl();
-  window.location.href = url;
-  return url;
-}
-
-/**
- * Fetch the list of available reports from booking.com API.
- * Returns array of report objects with id, name, status, etc.
- */
-async function fetchReportList() {
-  const ses = getSessionId();
-  const url = `https://admin.booking.com/fresa/extranet/reservations/list_request?hotel_id=${HOTEL_ID}&ses=${ses}&hotel_account_id=${HOTEL_ACCOUNT_ID}&lang=xu`;
-
-  console.log('[content.js] Fetching report list from:', url);
-
-  const response = await fetch(url, {
-    credentials: 'include'
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch report list: ${response.status}`);
+  const current = new Date(today);
+  while (current <= end) {
+    dates.push(formatISODate(current));
+    current.setDate(current.getDate() + 1);
   }
-
-  const data = await response.json();
-
-  if (!data.success || !data.data?.ok) {
-    throw new Error('API returned error');
-  }
-
-  return data.data.reports || [];
-}
-
-/**
- * Download a report by its ID.
- * Sends request to background script to use chrome.downloads API (skips Save As dialog).
- */
-function downloadReport(reportId) {
-  const ses = getSessionId();
-  const url = `https://admin.booking.com/fresa/extranet/reservations/download_request?lang=xu&hotel_account_id=${HOTEL_ACCOUNT_ID}&ses=${ses}&hotel_id=${HOTEL_ID}&report_id=${reportId}`;
-
-  console.log('[content.js] Requesting download:', url);
-
-  // Send to background script to download without Save As dialog
-  chrome.runtime.sendMessage({
-    action: 'downloadFile',
-    url: url,
-    filename: `reservations_${reportId}.xlsx`
-  }, (response) => {
-    if (response?.success) {
-      console.log('[content.js] Download started, ID:', response.downloadId);
-    } else {
-      console.error('[content.js] Download failed:', response?.error);
-    }
-  });
-}
-
-/**
- * Fetch reports and download the one with the largest ID.
- */
-async function downloadLatestReport() {
-  const reports = await fetchReportList();
-
-  if (reports.length === 0) {
-    throw new Error('No reports available');
-  }
-
-  // Find report with largest ID
-  const latestReport = reports.reduce((max, report) =>
-    report.id > max.id ? report : max
-  , reports[0]);
-
-  console.log('[content.js] Latest report:', latestReport);
-
-  downloadReport(latestReport.id);
-
-  return latestReport;
-}
-
-// ── Auto-download on the reservation search page ──────────────────────────────
-
-/**
- * When the content script is injected into the reservation search page,
- * fetch the report list via API and download the latest report.
- */
-if (window.location.pathname.includes('search_reservations')) {
-  const startDownload = async () => {
-    // Wait for page to settle
-    await new Promise(r => setTimeout(r, 2000));
-
-    try {
-      const report = await downloadLatestReport();
-      console.log('[content.js] Download initiated for report:', report.name);
-    } catch (e) {
-      console.warn('[content.js] Failed to download report:', e.message);
-    }
-  };
-
-  if (document.readyState === 'loading') {
-    console.log('[content.js] Waiting for DOMContentLoaded to start download');
-    document.addEventListener('DOMContentLoaded', startDownload);
-  } else {
-    console.log('[content.js] Document already loaded, starting download');
-    startDownload();
-  }
+  return dates;
 }
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
@@ -322,9 +199,90 @@ async function fetchLatestReportBinary() {
   return { base64, reportName: latestReport.name || `report_${latestReport.id}` };
 }
 
+// ── Fetch reservations from booking.com API ───────────────────────────────────
+
+/**
+ * Extract the CSRF token from the search_reservations.html form.
+ */
+function extractToken() {
+  const tokenInput = document.querySelector('input[name="token"][type="hidden"]');
+  if (!tokenInput) {
+    throw new Error('Could not find token input on page');
+  }
+  return tokenInput.value;
+}
+
+/**
+ * Fetch reservations from booking.com retrieve_list_v2 API.
+ * @param {string} dateFrom - Start date in YYYY-MM-DD format
+ * @param {string} dateTo - End date in YYYY-MM-DD format
+ * @returns {Promise<Array>} - Array of reservation objects
+ */
+async function fetchBookingReservations(dateFrom, dateTo) {
+  const token = extractToken();
+  const ses = getSessionId();
+
+  const params = new URLSearchParams({
+    hotel_account_id: HOTEL_ACCOUNT_ID,
+    hotel_id: HOTEL_ID,
+    lang: 'xu',
+    ses: ses,
+    perpage: '100',
+    page: '1',
+    date_type: 'arrival',
+    date_from: dateFrom,
+    date_to: dateTo,
+    token: token,
+    user_triggered_search: '1'
+  });
+
+  const url = `https://admin.booking.com/fresa/extranet/reservations/retrieve_list_v2?${params.toString()}`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    credentials: 'include'
+  });
+
+  if (!response.ok) {
+    throw new Error(`API request failed: ${response.status}`);
+  }
+
+  const data = await response.json();
+  console.log('[content.js] API response data:', data);
+
+  // Parse the response and extract reservation data
+  // The exact structure depends on booking.com's API response
+  const reservations = [];
+  if (data && data.data && data.data.reservations) {
+    for (const res of data.data.reservations) {
+      if (res.reservationStatus !== 'ok')
+        continue;
+      reservations.push({
+        name: res.guestName || 'unknown',
+        startDate: res.checkin || res.arrivalDate || '',
+        endDate: res.checkout || res.departureDate || '',
+        room: res.rooms || [],
+        source: 'booking.com',
+        bookingNumber: res.id || -1
+      });
+    }
+  }
+
+  return reservations;
+}
+
 // ── Message listener ──────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  // Fetch reservations from booking.com API
+  if (msg.action === 'fetchBookingReservations') {
+    const { dateFrom, dateTo } = msg;
+    fetchBookingReservations(dateFrom, dateTo)
+      .then(reservations => sendResponse({ success: true, reservations }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true; // keep channel open for async
+  }
+
   // Navigate to the reservation-statements download page.
   if (msg.action === 'extractReservations') {
     const url = navigateToDownloadPage();
@@ -353,6 +311,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.action === 'run') {
     const url = navigateToDownloadPage();
     sendResponse({ navigating: true, url });
+  }
+
+  // Fetch room inventory from GraphQL API.
+  if (msg.action === 'fetchRoomInventory') {
+    fetchRoomInventory()
+      .then(data => sendResponse({ success: true, data }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
   }
 
   return true; // keep channel open for async use

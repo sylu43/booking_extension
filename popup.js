@@ -16,6 +16,61 @@ function setRunning(isRunning) {
   document.getElementById('authenticate').disabled = isRunning;
 }
 
+// ── Booking.com API helpers ──────────────────────────────────────────────────
+
+/**
+ * Send a message to the content script on an active booking.com tab.
+ * Returns the response from the content script.
+ */
+async function sendToBookingTab(message) {
+  const tabs = await chrome.tabs.query({ url: 'https://admin.booking.com/*' });
+  if (tabs.length === 0) {
+    throw new Error('No booking.com admin tab found. Please open booking.com admin first.');
+  }
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabs[0].id, message, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+      } else if (!response?.success) {
+        reject(new Error(response?.error || 'Unknown error'));
+      } else {
+        resolve(response);
+      }
+    });
+  });
+}
+
+/**
+ * Format a Date as YYYY-MM-DD (local time).
+ */
+function formatISODate(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+/**
+ * Fetch reservations from booking.com via content script.
+ * Uses the retrieve_list_v2 API endpoint.
+ */
+async function fetchBookingComReservations() {
+  const today = new Date();
+  const tenDaysLater = new Date(today);
+  tenDaysLater.setDate(today.getDate() + 10);
+
+  const dateFrom = formatISODate(today);
+  const dateTo = formatISODate(tenDaysLater);
+
+  const response = await sendToBookingTab({
+    action: 'fetchBookingReservations',
+    dateFrom,
+    dateTo
+  });
+
+  return response.reservations || [];
+}
+
 // ── Google OAuth ──────────────────────────────────────────────────────────────
 
 function getAuthToken(interactive = true) {
@@ -249,28 +304,29 @@ async function runAutomation() {
   saveSettings();
 
   try {
+    // 1. Sign in to Google for Sheets access
     showStatus('Signing in to Google…', 'info');
     const token = await getAuthToken(true);
 
-    // 1. Fetch reservations from Google Sheet
-    showStatus('Fetching reservations from Google Sheet…', 'info');
+    // 2. Fetch reservations from booking.com API
+    showStatus('Fetching reservations from booking.com…', 'info');
     let reservations = [];
     try {
-      reservations = await fetchPhoneReservations(sourceSheetId, sourceRange, token);
-      showStatus(`Found ${reservations.length} reservation(s).`, 'info');
+      reservations = await fetchBookingComReservations();
+      showStatus(`Found ${reservations.length} reservation(s) from booking.com.`, 'info');
     } catch (e) {
-      showStatus(`Error: could not load reservations: ${e.message}`, 'error');
+      showStatus(`Error: could not load reservations from booking.com: ${e.message}`, 'error');
       setRunning(false);
       return;
     }
 
     if (reservations.length === 0) {
-      showStatus('No reservations found in source sheet.', 'warning');
+      showStatus('No reservations found from booking.com.', 'warning');
       setRunning(false);
       return;
     }
 
-    // 2. Build calendars for all months and write to a single "Calendar" sheet
+    // 3. Build calendars for all months and write to a single "Calendar" sheet
     const monthRange = getMonthRange();
     showStatus(`Building calendars for ${monthRange.length} months…`, 'info');
 
@@ -288,7 +344,7 @@ async function runAutomation() {
     await clearAndWriteTab(targetSheetId, CALENDAR_TAB, allCalendarRows, token);
 
     showStatus(
-      `✅ Done! ${reservations.length} reservations written to Calendar.`,
+      `✅ Done! ${reservations.length} reservations from booking.com written to Calendar.`,
       'success'
     );
   } catch (e) {
