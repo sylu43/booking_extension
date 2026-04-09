@@ -56,11 +56,11 @@ function formatISODate(date) {
  */
 async function fetchBookingComReservations() {
   const today = new Date();
-  const tenDaysLater = new Date(today);
-  tenDaysLater.setDate(today.getDate() + 10);
+  const thirtyDaysLater = new Date(today);
+  thirtyDaysLater.setDate(today.getDate() + 30);
 
   const dateFrom = formatISODate(today);
-  const dateTo = formatISODate(tenDaysLater);
+  const dateTo = formatISODate(thirtyDaysLater);
 
   const response = await sendToBookingTab({
     action: 'fetchBookingReservations',
@@ -185,6 +185,30 @@ async function ensureTab(spreadsheetId, tabName, token) {
 
 // ── Calendar builder ─────────────────────────────────────────────────────────
 
+// Room definitions with number and type
+const ROOMS = [
+  { number: '201', type: 'double', floor: 2 },
+  { number: '202', type: 'quadruple', floor: 2 },
+  { number: '203', type: 'double', floor: 2 },
+  { number: '205', type: 'double', floor: 2 },
+  { number: '206', type: 'quadruple', floor: 2 },
+  { number: '301', type: 'double', floor: 3 },
+  { number: '302', type: 'quadruple', floor: 3 },
+  { number: '303', type: 'family', floor: 3 },
+  { number: '305', type: 'triple', floor: 3 },
+  { number: '306', type: 'quadruple', floor: 3 },
+];
+
+// Map room names from booking.com to our types
+function normalizeRoomType(roomName) {
+  const name = (roomName || '').toLowerCase();
+  if (name.includes('double')) return 'double';
+  if (name.includes('quadruple')) return 'quadruple';
+  if (name.includes('family')) return 'family';
+  if (name.includes('triple')) return 'triple';
+  return null;
+}
+
 function parseDate(dateStr) {
   if (!dateStr) return null;
   const stripped = dateStr.replace(/^\s*(Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*\.?,?\s+/i, '').trim();
@@ -206,11 +230,133 @@ function parseDate(dateStr) {
 }
 
 /**
+ * Check if a room is available during the given date range.
+ */
+function isRoomAvailable(roomAssignments, roomIndex, startDate, endDate) {
+  for (const assignment of roomAssignments[roomIndex]) {
+    // Overlap check: new reservation overlaps if it starts before existing ends and ends after existing starts
+    if (startDate < assignment.endParsed && endDate > assignment.startParsed) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Find available rooms of a specific type, preferring a specific floor.
+ * Returns array of room indices.
+ */
+function findAvailableRooms(roomAssignments, type, quantity, startDate, endDate, preferredFloor = null) {
+  const candidates = [];
+
+  // First pass: rooms on preferred floor
+  if (preferredFloor) {
+    for (let i = 0; i < ROOMS.length; i++) {
+      if (ROOMS[i].type === type && ROOMS[i].floor === preferredFloor) {
+        if (isRoomAvailable(roomAssignments, i, startDate, endDate)) {
+          candidates.push(i);
+          if (candidates.length >= quantity) return candidates;
+        }
+      }
+    }
+  }
+
+  // Second pass: any floor
+  for (let i = 0; i < ROOMS.length; i++) {
+    if (ROOMS[i].type === type && !candidates.includes(i)) {
+      if (isRoomAvailable(roomAssignments, i, startDate, endDate)) {
+        candidates.push(i);
+        if (candidates.length >= quantity) return candidates;
+      }
+    }
+  }
+
+  return candidates;
+}
+
+/**
+ * Assign rooms to a reservation based on its room requirements.
+ * Tries to keep rooms on the same floor.
+ */
+function assignRoomsToReservation(roomAssignments, reservation) {
+  const rooms = reservation.rooms || [];
+  if (rooms.length === 0) return [];
+
+  const assigned = [];
+
+  // Determine preferred floor based on first room type availability
+  let preferredFloor = null;
+
+  // Try floor 2 first, then floor 3
+  for (const floor of [2, 3]) {
+    let canFitAll = true;
+    const tempAssignments = [];
+
+    for (const roomReq of rooms) {
+      const type = normalizeRoomType(roomReq.name);
+      if (!type) continue;
+
+      const quantity = roomReq.quantity || 1;
+      const available = findAvailableRooms(
+        roomAssignments,
+        type,
+        quantity,
+        reservation.startParsed,
+        reservation.endParsed,
+        floor
+      );
+
+      if (available.length < quantity) {
+        canFitAll = false;
+        break;
+      }
+
+      tempAssignments.push({ type, indices: available.slice(0, quantity) });
+    }
+
+    if (canFitAll) {
+      preferredFloor = floor;
+      // Actually assign the rooms
+      for (const { indices } of tempAssignments) {
+        for (const idx of indices) {
+          roomAssignments[idx].push(reservation);
+          assigned.push(idx);
+        }
+      }
+      break;
+    }
+  }
+
+  // If we couldn't fit on a single floor, assign wherever available
+  if (preferredFloor === null) {
+    for (const roomReq of rooms) {
+      const type = normalizeRoomType(roomReq.name);
+      if (!type) continue;
+
+      const quantity = roomReq.quantity || 1;
+      const available = findAvailableRooms(
+        roomAssignments,
+        type,
+        quantity,
+        reservation.startParsed,
+        reservation.endParsed
+      );
+
+      for (let i = 0; i < Math.min(quantity, available.length); i++) {
+        roomAssignments[available[i]].push(reservation);
+        assigned.push(available[i]);
+      }
+    }
+  }
+
+  return assigned;
+}
+
+/**
  * Build a 2-D calendar grid for the given month.
- * Accepts reservation objects with { name, startDate, endDate }.
+ * Accepts reservation objects with { name, startDate, endDate, rooms }.
  */
 function buildCalendar(reservations, year, month) {
-  const NUM_ROOMS = 10;
   const daysInMonth = new Date(year, month, 0).getDate();
   const monthStart  = new Date(year, month - 1, 1);
   const monthEnd    = new Date(year, month - 1, daysInMonth);
@@ -222,28 +368,30 @@ function buildCalendar(reservations, year, month) {
 
   parsed.sort((a, b) => a.startParsed - b.startParsed);
 
-  const rooms = Array.from({ length: NUM_ROOMS }, () => []);
+  // Initialize room assignments
+  const roomAssignments = Array.from({ length: ROOMS.length }, () => []);
+
+  // Assign rooms to each reservation
   for (const res of parsed) {
-    for (let i = 0; i < NUM_ROOMS; i++) {
-      const last = rooms[i][rooms[i].length - 1];
-      if (!last || last.endParsed <= res.startParsed) {
-        rooms[i].push(res);
-        break;
-      }
-    }
+    assignRoomsToReservation(roomAssignments, res);
   }
 
+  // Build header row with room numbers
   const header = ['Room'];
   for (let d = 1; d <= daysInMonth; d++) header.push(String(d));
 
   const rows = [header];
-  for (let i = 0; i < NUM_ROOMS; i++) {
-    const row = [`Room ${i + 1}`];
+  for (let i = 0; i < ROOMS.length; i++) {
+    const room = ROOMS[i];
+    const row = [`${room.number} (${room.type})`];
     for (let d = 1; d <= daysInMonth; d++) {
       const date = new Date(year, month - 1, d);
       let cell = '';
-      for (const res of rooms[i]) {
-        if (date >= res.startParsed && date < res.endParsed) { cell = res.name || ''; break; }
+      for (const res of roomAssignments[i]) {
+        if (date >= res.startParsed && date < res.endParsed) {
+          cell = res.name || '';
+          break;
+        }
       }
       row.push(cell);
     }

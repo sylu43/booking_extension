@@ -235,6 +235,7 @@ async function fetchBookingReservations(dateFrom, dateTo) {
     token: token,
     user_triggered_search: '1'
   });
+  params.append('reservation_status[]', 'ok');
 
   const url = `https://admin.booking.com/fresa/extranet/reservations/retrieve_list_v2?${params.toString()}`;
 
@@ -261,7 +262,7 @@ async function fetchBookingReservations(dateFrom, dateTo) {
         name: res.guestName || 'unknown',
         startDate: res.checkin || res.arrivalDate || '',
         endDate: res.checkout || res.departureDate || '',
-        room: res.rooms || [],
+        rooms: res.rooms || [],
         source: 'booking.com',
         bookingNumber: res.id || -1
       });
