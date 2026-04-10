@@ -490,6 +490,126 @@ function assignRoomsToReservation(roomAssignments, reservation) {
 }
 
 /**
+ * Try to rearrange existing reservations to make room for a new one.
+ * For each needed type, find all same-type rooms and check if swapping
+ * existing reservations between them frees a contiguous slot.
+ * Returns assigned indices or empty array if rearrangement failed.
+ */
+function tryRearrangeAndAssign(roomAssignments, reservation, neededTypes) {
+  // Group room indices by type
+  const typeToIndices = {};
+  for (let i = 0; i < ROOMS.length; i++) {
+    const t = ROOMS[i].type;
+    if (!typeToIndices[t]) typeToIndices[t] = [];
+    typeToIndices[t].push(i);
+  }
+
+  // For single-type single-room case: try swapping between same-type rooms
+  if (neededTypes.length === 1) {
+    const type = neededTypes[0];
+    const sameTypeRooms = typeToIndices[type] || [];
+    if (sameTypeRooms.length < 2) return [];
+
+    // Find which same-type rooms have blockers for this reservation's dates
+    for (const targetIdx of sameTypeRooms) {
+      // Find conflicting reservations in this room
+      const conflicts = roomAssignments[targetIdx].filter(
+        a => reservation.startParsed < a.endParsed && reservation.endParsed > a.startParsed
+      );
+      if (conflicts.length === 0) continue; // should have been found already
+
+      // Try to move each conflicting reservation to another same-type room
+      let canClearAll = true;
+      const moves = []; // {res, fromIdx, toIdx}
+
+      for (const conflict of conflicts) {
+        let moved = false;
+        for (const altIdx of sameTypeRooms) {
+          if (altIdx === targetIdx) continue;
+          // Check the alternative room is free for the conflicting reservation's full range
+          const altFree = !roomAssignments[altIdx].some(
+            a => a !== conflict && conflict.startParsed < a.endParsed && conflict.endParsed > a.startParsed
+          );
+          // Also make sure we're not moving it somewhere that blocks another planned move
+          const blockedByMove = moves.some(
+            m => m.toIdx === altIdx && conflict.startParsed < m.res.endParsed && conflict.endParsed > m.res.startParsed
+          );
+          if (altFree && !blockedByMove) {
+            moves.push({ res: conflict, fromIdx: targetIdx, toIdx: altIdx });
+            moved = true;
+            break;
+          }
+        }
+        if (!moved) { canClearAll = false; break; }
+      }
+
+      if (canClearAll) {
+        // Execute the moves
+        for (const { res, fromIdx, toIdx } of moves) {
+          roomAssignments[fromIdx] = roomAssignments[fromIdx].filter(r => r !== res);
+          roomAssignments[toIdx].push(res);
+        }
+        // Place the new reservation
+        roomAssignments[targetIdx].push(reservation);
+        return [targetIdx];
+      }
+    }
+    return [];
+  }
+
+  // Multi-room: try each room combination via brute force with rearrangement
+  // For simplicity, attempt normal assignment after trying to free one room at a time
+  for (const type of [...new Set(neededTypes)]) {
+    const sameTypeRooms = typeToIndices[type] || [];
+    for (const targetIdx of sameTypeRooms) {
+      const conflicts = roomAssignments[targetIdx].filter(
+        a => reservation.startParsed < a.endParsed && reservation.endParsed > a.startParsed
+      );
+      if (conflicts.length === 0) continue;
+
+      let canClearAll = true;
+      const moves = [];
+
+      for (const conflict of conflicts) {
+        let moved = false;
+        for (const altIdx of sameTypeRooms) {
+          if (altIdx === targetIdx) continue;
+          const altFree = !roomAssignments[altIdx].some(
+            a => a !== conflict && conflict.startParsed < a.endParsed && conflict.endParsed > a.startParsed
+          );
+          const blockedByMove = moves.some(
+            m => m.toIdx === altIdx && conflict.startParsed < m.res.endParsed && conflict.endParsed > m.res.startParsed
+          );
+          if (altFree && !blockedByMove) {
+            moves.push({ res: conflict, fromIdx: targetIdx, toIdx: altIdx });
+            moved = true;
+            break;
+          }
+        }
+        if (!moved) { canClearAll = false; break; }
+      }
+
+      if (canClearAll) {
+        // Execute moves for this one room
+        for (const { res, fromIdx, toIdx } of moves) {
+          roomAssignments[fromIdx] = roomAssignments[fromIdx].filter(r => r !== res);
+          roomAssignments[toIdx].push(res);
+        }
+        // Now try normal assignment again (one room freed up)
+        const result = assignRoomsToReservation(roomAssignments, reservation);
+        if (result.length > 0) return result;
+        // Undo moves if it still didn't work
+        for (const { res, fromIdx, toIdx } of moves) {
+          roomAssignments[toIdx] = roomAssignments[toIdx].filter(r => r !== res);
+          roomAssignments[fromIdx].push(res);
+        }
+      }
+    }
+  }
+  return [];
+}
+
+/**
  * Build a 2-D calendar grid for the given month.
  * Accepts reservation objects with { name, startDate, endDate, rooms }.
  *
@@ -498,7 +618,7 @@ function assignRoomsToReservation(roomAssignments, reservation) {
  * Cancelled reservations (in existing but not in new data) are removed.
  * New reservations are assigned to available rooms automatically.
  */
-function buildCalendar(reservations, year, month, existingMonthAssignments = {}) {
+function buildCalendar(reservations, year, month, existingMonthAssignments = {}, autoRearrange = false) {
   const daysInMonth = new Date(year, month, 0).getDate();
   const monthStart  = new Date(year, month - 1, 1);
   const monthEnd    = new Date(year, month - 1, daysInMonth);
@@ -512,6 +632,7 @@ function buildCalendar(reservations, year, month, existingMonthAssignments = {})
 
   // Initialize room assignments
   const roomAssignments = Array.from({ length: ROOMS.length }, () => []);
+  const unplaceable = [];
 
   // Phase 1: Restore existing room assignments for reservations that still exist
   const placedIndices = new Set();
@@ -562,7 +683,28 @@ function buildCalendar(reservations, year, month, existingMonthAssignments = {})
   // Phase 2: Assign remaining (new) reservations to available rooms
   const unplaced = parsed.filter((_, idx) => !placedIndices.has(idx));
   for (const res of unplaced) {
-    assignRoomsToReservation(roomAssignments, res);
+    const result = assignRoomsToReservation(roomAssignments, res);
+    if (result.length === 0) {
+      // Normal assignment failed
+      if (autoRearrange) {
+        // Try swap-based rearrangement
+        const neededTypes = [];
+        for (const req of (res.rooms || [])) {
+          const type = normalizeRoomType(req.name);
+          if (!type) continue;
+          const qty = req.quantity || 1;
+          for (let q = 0; q < qty; q++) neededTypes.push(type);
+        }
+        const swapResult = neededTypes.length > 0
+          ? tryRearrangeAndAssign(roomAssignments, res, neededTypes)
+          : [];
+        if (swapResult.length === 0) {
+          unplaceable.push(res);
+        }
+      } else {
+        unplaceable.push(res);
+      }
+    }
   }
 
   // Build header row with room numbers
@@ -586,24 +728,149 @@ function buildCalendar(reservations, year, month, existingMonthAssignments = {})
     }
     rows.push(row);
   }
-  return rows;
+
+  // Phase 3: Force-place unplaceable reservations day-by-day, track cells to highlight
+  const splitCells = []; // {gridRow, gridCol} relative to this month's grid
+  const trulyUnplaceable = [];
+
+  for (const res of unplaceable) {
+    const cellName = res.name
+      ? res.name + (res.source !== 'manual' ? BOOKING_TAG : '')
+      : '';
+    if (!cellName) { trulyUnplaceable.push(res); continue; }
+
+    // Determine preferred room type
+    const neededTypes = [];
+    for (const req of (res.rooms || [])) {
+      const type = normalizeRoomType(req.name);
+      if (type) neededTypes.push(type);
+    }
+    const preferredType = neededTypes[0] || null;
+    let anyPlaced = false;
+
+    for (let d = 1; d <= daysInMonth; d++) {
+      const date = new Date(year, month - 1, d);
+      if (date < res.startParsed || date >= res.endParsed) continue;
+
+      let placedRowIdx = -1;
+
+      // Try preferred room type first
+      if (preferredType) {
+        for (let i = 0; i < ROOMS.length; i++) {
+          if (ROOMS[i].type !== preferredType) continue;
+          if (rows[i + 1][d] === '') {
+            rows[i + 1][d] = cellName;
+            placedRowIdx = i;
+            break;
+          }
+        }
+      }
+
+      // Fallback: any empty room
+      if (placedRowIdx === -1) {
+        for (let i = 0; i < ROOMS.length; i++) {
+          if (rows[i + 1][d] === '') {
+            rows[i + 1][d] = cellName;
+            placedRowIdx = i;
+            break;
+          }
+        }
+      }
+
+      if (placedRowIdx >= 0) {
+        anyPlaced = true;
+        splitCells.push({ gridRow: placedRowIdx + 1, gridCol: d });
+      }
+    }
+
+    if (!anyPlaced) {
+      trulyUnplaceable.push(res);
+    }
+  }
+
+  return { rows, unplaceable: trulyUnplaceable, splitCells };
 }
 
 // ── Persistence (save / restore settings) ────────────────────────────────────
+
+/**
+ * Get the numeric sheetId of a tab by name.
+ */
+async function getTabSheetId(spreadsheetId, tabName, token) {
+  const metaRes = await fetch(`${SHEETS_API}/${encodeURIComponent(spreadsheetId)}`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  if (!metaRes.ok) return null;
+  const meta = await metaRes.json();
+  const sheet = meta.sheets?.find(s => s.properties?.title === tabName);
+  return sheet ? sheet.properties.sheetId : null;
+}
+
+/**
+ * Highlight specific cells in the Calendar tab with an orange background.
+ * Clears all existing background colours first, then applies highlights.
+ * @param {string}  spreadsheetId
+ * @param {Array}   cells  – [{row, col}] absolute 0-based positions in the sheet
+ * @param {string}  token
+ */
+async function highlightCells(spreadsheetId, cells, token) {
+  const sheetId = await getTabSheetId(spreadsheetId, CALENDAR_TAB, token);
+  if (sheetId == null || cells.length === 0) return;
+
+  const requests = [
+    // Reset all background colours in the tab
+    {
+      repeatCell: {
+        range: { sheetId },
+        cell: { userEnteredFormat: { backgroundColor: { red: 1, green: 1, blue: 1 } } },
+        fields: 'userEnteredFormat.backgroundColor'
+      }
+    }
+  ];
+
+  // Apply orange highlight to each cell
+  for (const { row, col } of cells) {
+    requests.push({
+      repeatCell: {
+        range: {
+          sheetId,
+          startRowIndex: row,
+          endRowIndex: row + 1,
+          startColumnIndex: col,
+          endColumnIndex: col + 1
+        },
+        cell: {
+          userEnteredFormat: {
+            backgroundColor: { red: 1, green: 0.85, blue: 0.4 }
+          }
+        },
+        fields: 'userEnteredFormat.backgroundColor'
+      }
+    });
+  }
+
+  await fetch(`${SHEETS_API}/${encodeURIComponent(spreadsheetId)}:batchUpdate`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ requests })
+  });
+}
 
 function saveSettings() {
   chrome.storage.local.set({
     sourceSheetId: document.getElementById('sourceSheetId').value,
     sourceRange:   document.getElementById('sourceRange').value,
-    targetSheetId: document.getElementById('targetSheetId').value
+    targetSheetId: document.getElementById('targetSheetId').value,
+    autoRearrange: document.getElementById('autoRearrange').checked
   });
 }
 
 function loadSettings() {
-  chrome.storage.local.get(['sourceSheetId', 'sourceRange', 'targetSheetId'], (data) => {
+  chrome.storage.local.get(['sourceSheetId', 'sourceRange', 'targetSheetId', 'autoRearrange'], (data) => {
     if (data.sourceSheetId) document.getElementById('sourceSheetId').value = data.sourceSheetId;
     if (data.sourceRange)   document.getElementById('sourceRange').value   = data.sourceRange;
     if (data.targetSheetId) document.getElementById('targetSheetId').value = data.targetSheetId;
+    if (data.autoRearrange != null) document.getElementById('autoRearrange').checked = data.autoRearrange;
   });
 }
 
@@ -672,24 +939,61 @@ async function runAutomation() {
     const monthRange = getMonthRange();
     showStatus(`Building calendars for ${monthRange.length} months…`, 'info');
 
+    const autoRearrange = document.getElementById('autoRearrange').checked;
+
     const allCalendarRows = [];
+    const allUnplaceable = [];
+    const allSplitCells = [];  // {row, col} absolute in sheet
+    let rowOffset = 0;
     for (const { year, month } of monthRange) {
       const monthName = new Date(year, month - 1, 1).toLocaleString('default', { month: 'long' });
       const monthKey = `${year}-${month}`;
       // Month separator row
       allCalendarRows.push([`${monthName} ${year}`]);
-      const calendar = buildCalendar(reservations, year, month, existingAssignments[monthKey] || {});
+      const gridStartRow = rowOffset + 1; // +1 for month title row
+      const { rows: calendar, unplaceable, splitCells } = buildCalendar(
+        reservations, year, month,
+        existingAssignments[monthKey] || {},
+        autoRearrange
+      );
       allCalendarRows.push(...calendar);
       allCalendarRows.push([]);  // blank row between months
+      for (const res of unplaceable) {
+        allUnplaceable.push({ ...res, monthName: `${monthName} ${year}` });
+      }
+      // Convert grid-relative split cells to absolute sheet positions
+      for (const { gridRow, gridCol } of splitCells) {
+        allSplitCells.push({ row: gridStartRow + gridRow, col: gridCol });
+      }
+      rowOffset += 1 + calendar.length + 1; // title + grid + blank
     }
 
     showStatus('Writing calendar…', 'info');
     await clearAndWriteTab(targetSheetId, CALENDAR_TAB, allCalendarRows, token);
 
-    showStatus(
-      `✅ Done! ${reservations.length} reservations from booking.com written to Calendar.`,
-      'success'
-    );
+    // Apply highlights for split-placed reservations
+    if (allSplitCells.length > 0) {
+      showStatus('Highlighting split reservations…', 'info');
+      await highlightCells(targetSheetId, allSplitCells, token);
+    }
+
+    if (allUnplaceable.length > 0) {
+      const names = allUnplaceable.map(r => `• ${r.name} (${r.monthName})`).join('\n');
+      showStatus(
+        `⚠️ Done with ${allUnplaceable.length} unplaceable reservation(s):\n${names}`,
+        'warning'
+      );
+    } else if (allSplitCells.length > 0) {
+      showStatus(
+        `✅ Done! ${reservations.length} reservations written. Some required split rooms (highlighted in orange).`,
+        'warning'
+      );
+    } else {
+      showStatus(
+        `✅ Done! ${reservations.length} reservations from booking.com written to Calendar.`,
+        'success'
+      );
+    }
   } catch (e) {
     showStatus(`Error: ${e.message}`, 'error');
   } finally {
