@@ -342,11 +342,12 @@ function roomSpread(indices) {
  * @param {number|null}   floor           - restrict to this floor, or null for any
  * @returns {Array<number>|null} room indices, or null if impossible
  */
-function findClosestRooms(roomAssignments, neededTypes, reservation, floor) {
+function findClosestRooms(roomAssignments, neededTypes, reservation, floor, excludeIndices = []) {
   const candidates = [];
   for (const type of neededTypes) {
     const typeCandidates = [];
     for (let i = 0; i < ROOMS.length; i++) {
+      if (excludeIndices.includes(i)) continue;
       if (ROOMS[i].type !== type) continue;
       if (floor !== null && ROOMS[i].floor !== floor) continue;
       if (!isRoomAvailable(roomAssignments, i, reservation.startParsed, reservation.endParsed)) continue;
@@ -382,10 +383,11 @@ function findClosestRooms(roomAssignments, neededTypes, reservation, floor) {
 
 /**
  * Assign rooms to a reservation based on its room requirements.
- * Rules:
- * - If any room is triple/family → prefer floor 3, rooms close together
- * - If multi-room with no triple/family → try both floors, pick closest spread
- * - If single room → prefer floor 2 first
+ * Priority order:
+ * 1. If this guest already occupies room(s), keep them in the same room(s)
+ * 2. If any room is triple/family → prefer floor 3, rooms close together
+ * 3. If multi-room with no triple/family → try both floors, pick closest spread
+ * 4. If single room → prefer floor 2 first
  * Falls back to cross-floor assignment if no single floor works.
  */
 function assignRoomsToReservation(roomAssignments, reservation) {
@@ -402,6 +404,55 @@ function assignRoomsToReservation(roomAssignments, reservation) {
   }
   if (neededTypes.length === 0) return [];
 
+  // ── Priority 1: Keep guest in rooms they already occupy ──────────
+  // Find all rooms where this guest already has an assignment
+  // (from existing calendar restore or earlier reservations in this build).
+  // This ensures a guest doesn't move between rooms across date ranges
+  // and that a reservation stays in the same physical room.
+  const guestExistingRooms = [];
+  for (let i = 0; i < ROOMS.length; i++) {
+    if (roomAssignments[i].some(r => r.name === reservation.name)) {
+      guestExistingRooms.push(i);
+    }
+  }
+
+  if (guestExistingRooms.length > 0) {
+    const pinned = [];
+    const unfulfilled = [...neededTypes];
+
+    // Match existing rooms to needed types
+    for (const ri of guestExistingRooms) {
+      const roomType = ROOMS[ri].type;
+      const typeIdx = unfulfilled.indexOf(roomType);
+      if (typeIdx !== -1 && isRoomAvailable(roomAssignments, ri, reservation.startParsed, reservation.endParsed)) {
+        pinned.push(ri);
+        unfulfilled.splice(typeIdx, 1);
+      }
+    }
+
+    if (unfulfilled.length === 0 && pinned.length > 0) {
+      // All needs satisfied by existing rooms
+      for (const idx of pinned) {
+        roomAssignments[idx].push(reservation);
+      }
+      return pinned;
+    }
+
+    // Some needs pinned, find closest rooms for the rest
+    if (pinned.length > 0 && unfulfilled.length > 0) {
+      const extra = findClosestRooms(roomAssignments, unfulfilled, reservation, null, pinned);
+      if (extra) {
+        const all = [...pinned, ...extra];
+        for (const idx of all) {
+          roomAssignments[idx].push(reservation);
+        }
+        return all;
+      }
+    }
+    // Fall through to normal algorithm if pinning didn't work
+  }
+
+  // ── Priority 2+: Floor preference based on room types ────────────
   const isSingle = neededTypes.length === 1;
   const needsThirdFloor = neededTypes.some(t => t === 'triple' || t === 'family');
 
