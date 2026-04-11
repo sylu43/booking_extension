@@ -52,16 +52,36 @@ function formatISODate(date) {
 
 async function fetchBookingComReservations() {
   const today = new Date();
-  const thirtyDaysLater = new Date(today);
-  thirtyDaysLater.setDate(today.getDate() + 30);
-  const dateFrom = formatISODate(today);
-  const dateTo = formatISODate(thirtyDaysLater);
-  const response = await sendToBookingTab({
-    action: 'fetchBookingReservations',
-    dateFrom,
-    dateTo
-  });
-  return response.reservations || [];
+  const allReservations = [];
+  const seen = new Set();
+
+  // Query 180 days in 10-day chunks (10 rooms × 10 days ≤ 100 items per query)
+  for (let offset = 0; offset < 180; offset += 10) {
+    const from = new Date(today);
+    from.setDate(today.getDate() + offset);
+    const to = new Date(today);
+    to.setDate(today.getDate() + offset + 10);
+
+    const response = await sendToBookingTab({
+      action: 'fetchBookingReservations',
+      dateFrom: formatISODate(from),
+      dateTo: formatISODate(to)
+    });
+
+    for (const res of (response.reservations || [])) {
+      const key = res.bookingNumber || `${res.name}_${res.startDate}_${res.endDate}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        allReservations.push(res);
+      }
+    }
+
+    broadcastStatus(`Fetching reservations… (day ${offset + 10}/300)`, 'info');
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+    await sleep(2000);
+  }
+
+  return allReservations;
 }
 
 // ── Google OAuth ──────────────────────────────────────────────────────────────
@@ -657,7 +677,7 @@ async function highlightCells(spreadsheetId, cells, token) {
 function getMonthRange() {
   const months = [];
   const now = new Date();
-  for (let i = 0; i < 7; i++) {
+  for (let i = 0; i < 11; i++) {
     const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
     months.push({ year: d.getFullYear(), month: d.getMonth() + 1 });
   }
