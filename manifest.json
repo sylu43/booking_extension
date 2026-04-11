@@ -20,8 +20,7 @@
   "content_scripts": [
     {
       "matches": [
-        "https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage/home.html*",
-        "https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage/search_reservations.html*"
+        "https://admin.booking.com/hotel/hoteladmin/extranet_ng/manage/*"
       ],
       "js": ["content.js"]
     }
