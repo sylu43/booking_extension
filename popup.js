@@ -1,7 +1,6 @@
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets';
-const DEFAULT_SOURCE_RANGE = 'Sheet1!A2:D';
 
 // ── UI helpers ────────────────────────────────────────────────────────────────
 
@@ -215,26 +214,6 @@ function parseExistingAssignments(sheetRows) {
     }
   }
   return result;
-}
-
-// ── Phone reservations (from Google Sheet) ────────────────────────────────────
-
-/**
- * Fetch phone/manual reservations from the source Google Sheet.
- * Expected columns: A=Name, B=Check-in, C=Check-out, D=Room (optional)
- */
-async function fetchPhoneReservations(sheetId, range, token) {
-  const data = await sheetsGet(sheetId, range, token);
-  const rows = data.values || [];
-  return rows
-    .filter(row => row[0] && row[1] && row[2])
-    .map(row => ({
-      name:      row[0].trim(),
-      startDate: row[1].trim(),
-      endDate:   row[2].trim(),
-      room:      row[3] ? row[3].trim() : '',
-      source:    'phone'
-    }));
 }
 
 // ── Google Sheet tab helpers ─────────────────────────────────────────────────
@@ -858,17 +837,13 @@ async function highlightCells(spreadsheetId, cells, token) {
 
 function saveSettings() {
   chrome.storage.local.set({
-    sourceSheetId: document.getElementById('sourceSheetId').value,
-    sourceRange:   document.getElementById('sourceRange').value,
     targetSheetId: document.getElementById('targetSheetId').value,
     autoRearrange: document.getElementById('autoRearrange').checked
   });
 }
 
 function loadSettings() {
-  chrome.storage.local.get(['sourceSheetId', 'sourceRange', 'targetSheetId', 'autoRearrange'], (data) => {
-    if (data.sourceSheetId) document.getElementById('sourceSheetId').value = data.sourceSheetId;
-    if (data.sourceRange)   document.getElementById('sourceRange').value   = data.sourceRange;
+  chrome.storage.local.get(['targetSheetId', 'autoRearrange'], (data) => {
     if (data.targetSheetId) document.getElementById('targetSheetId').value = data.targetSheetId;
     if (data.autoRearrange != null) document.getElementById('autoRearrange').checked = data.autoRearrange;
   });
@@ -890,17 +865,10 @@ function getMonthRange() {
 }
 
 async function runAutomation() {
-  const sourceSheetId = document.getElementById('sourceSheetId').value.trim();
-  const sourceRange   = document.getElementById('sourceRange').value.trim() || DEFAULT_SOURCE_RANGE;
   const targetSheetId = document.getElementById('targetSheetId').value.trim();
 
   if (!targetSheetId) {
     showStatus('Please enter the Target Google Sheet ID.', 'error');
-    return;
-  }
-
-  if (!sourceSheetId) {
-    showStatus('Please enter the Source Google Sheet ID.', 'error');
     return;
   }
 
