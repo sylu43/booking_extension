@@ -141,14 +141,25 @@
     <label for="autoRearrange">Auto-rearrange rooms when new reservations don't fit</label>
   </div>
 
+  <div class="checkbox-field">
+    <input type="checkbox" id="scheduleEnabled" />
+    <label for="scheduleEnabled">Enable scheduled sync</label>
+  </div>
+
+  <div class="field" id="scheduleConfig" style="display:none;">
+    <label for="scheduleHours">Sync hours (0–23, comma-separated)</label>
+    <input type="text" id="scheduleHours" placeholder="e.g. 8, 14, 20" />
+    <p class="hint">Runs automatically at the specified hours daily</p>
+  </div>
+
   <div class="btn-row">
     <button id="authenticate">🔑 Sign in</button>
     <button id="run">▶ Run</button>
   </div>
 
   <div id="status"></div>
+  <div id="lastSync" class="hint" style="margin-top: 6px;"></div>
 
-  <script src="xlsx.full.min.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
