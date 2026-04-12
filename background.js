@@ -799,6 +799,13 @@ function setupScheduleAlarm() {
 }
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'refreshBookingTab') {
+    const tabs = await chrome.tabs.query({ url: 'https://admin.booking.com/*' });
+    for (const tab of tabs) {
+      chrome.tabs.reload(tab.id);
+    }
+    return;
+  }
   if (alarm.name !== 'scheduledSync') return;
   const data = await chrome.storage.local.get(['scheduleEnabled', 'scheduleHours', 'targetSheetId', 'autoRearrange']);
   if (!data.scheduleEnabled || !data.targetSheetId) return;
@@ -806,6 +813,9 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (!data.scheduleHours?.includes(currentHour)) return;
   await runAutomationCore(data.targetSheetId, !!data.autoRearrange, false);
 });
+
+// Refresh booking.com tab every 10 minutes to prevent auto-logout
+chrome.alarms.create('refreshBookingTab', { periodInMinutes: 10 });
 
 // Restore alarms on service worker startup
 setupScheduleAlarm();
