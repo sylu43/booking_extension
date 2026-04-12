@@ -727,7 +727,7 @@ async function runAutomationCore(targetSheetId, autoRearrange, interactive) {
     for (const { year, month } of monthRange) {
       const monthName = new Date(year, month - 1, 1).toLocaleString('default', { month: 'long' });
       const monthKey = `${year}-${month}`;
-      allCalendarRows.push([`${monthName} ${year}`]);
+      allCalendarRows.push([`${monthName} ${year}`, `updated: ${new Date()}`]);
       const gridStartRow = rowOffset + 1;
       const { rows: calendar, unplaceable, splitCells } = buildCalendar(
         reservations, year, month,
